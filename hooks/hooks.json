@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'foreman-lite plugin active: load the foreman skill (skills/foreman) as the default role before doing anything else in this thread.'"
+          }
+        ]
+      }
+    ]
+  }
+}
