@@ -68,6 +68,69 @@ Not speculative — this is what motivated the project:
   head agent's behavior wasn't surprising in retrospect, just not what
   the user wanted on reflection.
 
+## Success criteria (the actual filter)
+
+Stated directly, not architecture: any piece of structure (a role, a
+signal, a schema field) earns its place by serving one of these, not
+because it made a diagram cleaner. This is the standard vision.md's
+inherited structure hasn't been checked against yet.
+
+1. **One agent to talk to.** Delegate to it, it tracks completion,
+   unblocks stuck work, and specifically surfaces things that need *your*
+   judgment rather than solving everything or asking about everything.
+2. **Review catches a reasonable share of real errors.** Not "review
+   exists," not "review is independent" as an end in itself — independence
+   (Spawn) is a means to this, not the goal. "Reasonable" is undefined
+   so far — see Open Questions.
+3. **Default autonomous, never unmonitored.** Not stepping through each
+   task, but never fully blind either.
+4. **The workflow itself stays revisable** as you learn what actually
+   happens, rather than being locked in by an upfront design.
+5. **You can drill in and steer where needed** — concretely, by attaching
+   directly to a task's live session, not by relaying a request through
+   the foreman. This is the direct fix for the original noolang
+   annoyance (subagents going invisible once idle, small steering
+   relayed through the head agent).
+
+## Development posture
+
+Corrected mid-session after an earlier mis-summary ("spend LLM judgment
+ only where cheap rules fail") was flagged as contradicting where the
+loop-termination discussion actually landed:
+
+> As we iterate we can lean on the LLM to drive to functional and then
+> eliminate waste for things that are reliably mechanical.
+
+This is a development-time strategy, not a runtime gate. Build the
+foreman's (and other roles') judgment to cover a situation first, so the
+system works end to end. Watch it operate on real tasks. Extract a
+mechanical shortcut only once a pattern has proven itself reliable and
+boring — not by guessing upfront which parts of a decision are "obviously
+deterministic." Explicitly not building a hand-crafted decision tree /
+expert system that tries to encode good judgment as if-then rules.
+
+This is stated as the general posture for foreman-lite, not just for
+loop-termination — tentatively, per the last open-questions item below.
+
+## Interaction model: push and pull
+
+Two distinct, deliberately separate ways the director gets involved,
+mapped directly onto success criteria #1 and #5:
+
+- **Push**: a dev agent hits a decision point outside the scope of its
+  original task (something the initial request didn't cover) and emits
+  a `/flag` signal. The event lands in a log the foreman watches. The
+  foreman triages: tell the agent how to proceed itself, or escalate to
+  the director — concretely, something like an OS-level notification,
+  not just a dashboard update, since a blocked task sitting unnoticed
+  defeats "not unmonitored." `/flag` carries the same self-report
+  reliability risk as `/done` (see Open Questions) — not examined yet.
+- **Pull**: the director attaches directly to a task's live session to
+  add guidance or requirements, with no foreman relay involved. This is
+  what "drill in and steer" (#5) concretely means — confirmed as
+  attaching to the live session itself, not sending a message through
+  the foreman or another intermediary.
+
 ## Settled (re-derived this session)
 
 Each of these is a claim the user actively reasoned to, not inherited:
@@ -113,25 +176,19 @@ Each of these is a claim the user actively reasoned to, not inherited:
    a repeat of the original role-conflation problem, this time almost
    built into the reviewer itself.
 
-8. **Escalation is a resource-tiering principle, not just a
-   loop-termination rule**: spend the foreman's LLM judgment only where a
-   cheap/deterministic mechanism can't reliably decide. Tentatively
-   generalizable beyond this one case, not fully confirmed as a
-   system-wide principle.
-
-9. **For v1, don't pre-design stuck-loop mediation.** Give the foreman
-   visibility (the task's workflow step log) and real handles (halt a
-   task, spawn a fresh agent), and let its judgment handle oscillation
-   case-by-case. Known to not be the cheap path; deliberately deferred —
-   refine toward something cheaper/deterministic after observing real
-   behavior, not by guessing thresholds up front (a concrete number like
-   "3 rounds is fine, 8 is not" was floated and explicitly not committed
-   to).
+8. **For loop-termination specifically: give the foreman visibility (the
+   task's workflow step log) and real handles (halt a task, spawn a
+   fresh agent), and let its judgment handle oscillation case-by-case.**
+   No cheap rule gates this — see "Development posture" above for why
+   (this item was originally mis-summarized as a tiering/gating rule;
+   corrected). A concrete threshold like "3 rounds is fine, 8 is not"
+   was floated and explicitly not committed to; extraction into a cheap
+   rule happens later, if and when real behavior earns it.
 
 ## Open / parked, not resolved
 
-- **Checkpoint** — flagged twice as wanting a deeper pass, never actually
-  drilled into this session. Don't assume anything about it beyond the
+- **Checkpoint** — flagged multiple times as wanting a deeper pass, never
+  actually drilled into. Don't assume anything about it beyond the
   terminology mapping above.
 - **What triggers the next step after review's `/pass`/`/fail`** —
   foreman-mediated vs. dev auto-reactivating directly off review's
@@ -146,8 +203,15 @@ Each of these is a claim the user actively reasoned to, not inherited:
   match vs. free-text similarity vs. reviewer re-judging with memory of
   its prior ask. Not resolved; this is part of why stuck-loop handling
   was deferred to foreman judgment rather than a designed rule.
-- **Whether "spend LLM judgment only when cheap rules fail" holds as a
-  system-wide principle** or was specific to loop-termination. Tentative.
+- **What "reasonable" means for success criterion #2** (review catches a
+  reasonable share of real errors) — not yet defined. No target rate,
+  no way of measuring it named yet.
+- **`/flag` reliability** — same self-report risk as `/done`, not yet
+  examined the way review's self-assessment risk was.
+- **Whether the no-expert-system posture, applied backward to vision.md's
+  Role/lifecycle/Task-State structure, actually changes what gets built
+  first** — affirmed as a lens, not yet applied to a concrete decision
+  about what to build or skip.
 
 ## Session log
 
@@ -156,5 +220,8 @@ Each of these is a claim the user actively reasoned to, not inherited:
   from context-bloat and toward role-conflation, the review/verification
   design (automatic trigger, foreman-doesn't-review, Spawn-over-Role-swap
   for review, persistent reviewer, role separation applied to the
-  reviewer itself, escalation tiering, deliberately deferred stuck-loop
-  design). Stopped before Checkpoint.
+  reviewer itself, deliberately deferred stuck-loop design), the
+  development posture (LLM-judgment-first, mechanize what proves
+  reliable, no expert system), five success criteria, and the push/pull
+  interaction model (`/flag`+triage+notification vs. attach-to-live-
+  session). Stopped before Checkpoint.
