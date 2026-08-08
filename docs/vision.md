@@ -1,475 +1,60 @@
-# Task-Oriented Agent Teams with Ephemeral Roles
+## Vision
 
-## Thesis
+I want to talk to a head llm agent (foreman) who manages basic plate-spinning for multiple LLM tasks. This agent does not directly complete work I request but delegates to task agent workflows which it keeps track of and can answer to. It should raise any important decisions to me but unblock task threads where safe.
 
-Build an agent orchestration system where **the task is the unit of work, not the agent or role**.
+I want foreman to ensure that verification processes complete without doing the verification itself.
 
-The user operates at a director level through a persistent **Director → Foreman** thread. The foreman decomposes work into bounded tasks. Each task has durable state and a disposable working-memory history. Roles are activated within tasks as needed and do not persist independently.
+## Properties of the solution
 
-The system combines the useful parts of subagents and agent teams with explicit lifecycle management.
+1. I can manage everthing through the foreman if desired
+2. I can drill down into task threads directly and issue commands to the sub-agents
+3. Foreman conversation shows the state transitions for all sub-agents
 
----
+## Glossary
 
-# Terminology
+- `[context]` string. whatever the situation demands. could be short sentence, filepath, pr url, commit id, etc.
+- Task Thread - conceptual grouping of task agents and task state and working memory associated with a human's request
+- Working Memory - LLM conversation content for a specific agent. This could be compacted if necessary.
+- Task State - file state associated with a task thread. Probably isolated to git worktree so task threads don't conflict with each other. Shared between worker and verifier.
 
-The word **context** is deliberately avoided because it conflates several distinct concepts.
+## Agent roles
 
-### Thread
+I see 3 agent roles to start
 
-A conversation/process boundary.
-
-Examples:
-
-- Director thread
-- Task thread
-
-A thread may have a long-lived conversation history, but that history is not necessarily permanent.
-
-### Working Memory
-
-The accumulated model-visible conversation state for a task.
-
-This includes:
-
-- messages
-- reasoning history
-- tool calls/results
-- conversational interaction
-- transient discoveries
-
-Working memory is **expensive and disposable**.
-
-`/clear` discards working memory.
-
-### Task State
-
-The durable state describing what is known about a task.
-
-This includes:
-
-- requirements
-- current status
-- decisions
-- ADRs
-- rejected alternatives
-- relevant files/artifacts
-- test results
-- unresolved questions
-- handoff information
-- agent memory (if enabled)
-
-Task state survives working-memory destruction.
-
-### Role
-
-The currently active behavioral instruction and capabilities assigned to a task.
-
-Examples:
-
-- Engineer
-- Validator
-- Researcher
-- Architect
-
-Roles are **ephemeral**. A role does not own persistent memory.
-
-### Agent Invocation
-
-A model execution under a particular role with access to some working memory and task state.
-
-An invocation may change the task's state, emit lifecycle events, or be discarded.
+- Foreman - manages across task threads without getting into the details
+- Worker - completes requested work usually coding tasks
+- Verifier - double checks the task agent's output against request and contextual standards
 
 ### Foreman
 
-The persistent orchestration role that manages tasks, roles, working-memory lifecycle, and escalation to the director.
+MUST not complete tasks itself. It stays high-level orchestrator to keep tasks going so it's working memory doesn't get bloated. Compaction must not lose tract of task threads. Foremand doesn't review the work, just ensures that review happens.
 
-### Director
+**Commands**
+Create Task - Starts a task thread with a Worker agent.
+Halt Worker - Stops an in progress worker
+Flag - Sent OS notification to Human when something demands their attention
 
-The persistent high-level interaction between the user and the foreman.
+### Worker
 
-The director should operate primarily on goals, priorities, status, and decisions rather than implementation-level working memory.
+Completes requested task with reasonable autonomy where SAFE. Should start with evaluating the request and coming up with a plan.
+Must end each turn with a command. Hook should ensure this is satisfied. Worker is expected to write and run tests, static analysis, etc before sending work for review. Safe and `/flag` more important than `/done` and wrong.
 
----
+**Commands**
 
-# Core Model
+- /planned [context] - Worker declares that their plan is ready for review. This will be passed to the verifier by default (foreman discretion). Worker may skip this step for trivial requests.
+- /done [context] - worker declares task is ready for review. Content argument indicates the thing to review. Could be a spec or pull request or any other plain prose. Work is passed to verifier by default (foreman discretion)
+- /flag [context] - worker declares that they're blocked and need help. This could be for a decision from the human or because the request is not completable or any other issue preventing progress on task. Foreman will see this and decide how to address (if obvious without getting into the details) or raise the flag to the human.
 
-```text
-                         USER
-                          │
-                   DIRECTOR THREAD
-                    user + foreman
-                          │
-                   task orchestration
-                          │
-          ┌───────────────┼───────────────┐
-          ▼               ▼               ▼
-       TASK A           TASK B           TASK C
-          │               │               │
-     task state      task state      task state
-          │               │               │
-    working memory   working memory   working memory
-          │               │               │
-       Engineer        Engineer       Researcher
-          │               │               │
-       /done           /done          /done
-          │               │               │
-      Validator       Validator      Engineer
-```
+### Verifier
 
-The important distinction is:
+Verifies work planned or completed by the Worker agent. What that means is contextual. Verifier persists for the full task thread
 
-> **Task state is durable. Working memory is disposable. Roles are ephemeral.**
+**Commands**
 
----
+- /approve - Approve work
+- /deny [context] - Send work back to Worker for changes
+- /flag - Raise concern to the human when it seems like the worker is malfunctioning or if there's some large risk identified that the worker agent is unlikely to be able to resolve.
 
-# Roles Are Modes, Not Agents
+# Open questions
 
-A role is a system prompt + capabilities temporarily assigned to a task.
-
-For example:
-
-```text
-Task #17
-  │
-  ▼
-Engineer
-  │
- /done
-  │
-  ▼
-Validator
-  │
- /fail
-  │
-  ▼
-Engineer
-  │
- /done
-  │
-  ▼
-Validator
-  │
- /pass
-  │
-  ▼
-Task complete
-```
-
-The Engineer does not become a persistent Engineer agent.
-
-The Validator does not maintain an independent identity.
-
-The **task owns the work**; the role is simply the current operating mode.
-
-This permits role switching without rebuilding working memory.
-
----
-
-# Three Working-Memory Operations
-
-## Reuse
-
-Change the active role while retaining the same working memory.
-
-```text
-working memory
-      │
-      ├── Engineer
-      │
-      └── Validator
-```
-
-Use when accumulated reasoning is valuable.
-
-Example:
-
-> Engineer implements → Validator reviews the implementation.
-
----
-
-## Fork
-
-Create new working memory from durable task state.
-
-```text
-             task state
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
- working memory A    working memory B
-    Engineer           Reviewer
-```
-
-Use when independent judgment is valuable.
-
-The new worker gets the relevant task state, but does not inherit the entire conversational trajectory.
-
-This deliberately trades rehydration cost for cognitive independence.
-
-_Forman decides on workflow step completion_
-
----
-
-## Recycle
-
-Checkpoint durable task state, then discard working memory.
-
-```text
-working memory
-      │
-      │ checkpoint
-      ▼
-  task state
-      │
-      └──────► working memory discarded
-```
-
-Use when the accumulated working memory is no longer worth its token/latency cost.
-
-**Recycle is a resource-management operation, not a synonym for task completion.**
-
-**_Task agent may /checkpoint_**
-**_Foreman decides if wiping working memory at checkpoint or workflow step end._**
-
----
-
-# Lifecycle Signals
-
-Agents emit explicit semantic lifecycle events rather than relying on ordinary stop events.
-
-Examples:
-
-```text
-/done
-/pass
-/fail
-/checkpoint
-```
-
-The meaning is role-specific.
-
-Engineer:
-
-```text
-/done = implementation is ready for validation
-```
-
-Validator:
-
-```text
-/pass = implementation satisfies validation criteria
-/fail = concrete problems remain
-```
-
-Ordinary conversation does not trigger lifecycle transitions.
-
-If the user asks:
-
-> Why did you choose this abstraction?
-
-the Engineer answers and continues.
-
-A stop event after that answer is not a checkpoint.
-
----
-
-# Foreman Responsibilities
-
-The foreman owns **lifecycle decisions**, not implementation reasoning.
-
-It can inspect task metadata such as:
-
-```text
-Task: caching refactor
-Role: Engineer
-Working memory: 142k tokens
-Task state: 4k
-State: /done
-Tests: passing
-Unresolved questions: 1
-```
-
-The foreman can decide:
-
-- continue the current role
-- switch roles
-- fork an independent worker
-- request checkpointing
-- recycle working memory
-- close the task
-- escalate to the director
-
-The foreman does not need to load the entire working memory to make resource/lifecycle decisions.
-
----
-
-# Checkpointing
-
-Checkpointing is **semantic serialization**, not generic summarization.
-
-The active role should identify information that future work would otherwise have to rediscover:
-
-```text
-Decision
-Context / motivation
-Alternatives considered
-Rejected alternatives
-Consequences
-Current state
-Unresolved questions
-```
-
-Lightweight Nygard-style ADRs are a preferred durable format because they preserve **negative knowledge**:
-
-> We chose X, and Y was considered but rejected because Z.
-
-This prevents new working-memory instances from repeatedly rediscovering settled arguments.
-
-The checkpoint question is:
-
-> **If this working memory disappeared, what would a future agent desperately need to know?**
-
-not:
-
-> How do I summarize this conversation?
-
----
-
-# Validation
-
-Validation is a first-class lifecycle transition.
-
-The default path can reuse working memory:
-
-```text
-Engineer → Validator
-```
-
-because the validator may benefit from understanding how the implementation was developed.
-
-When independent judgment is valuable, the foreman can fork:
-
-```text
-                TASK STATE
-                    │
-             ┌──────┴──────┐
-             ▼             ▼
-       Working Memory A  Working Memory B
-          Engineer          Reviewer
-             │                │
-             └───────┬────────┘
-                     ▼
-                  Foreman
-```
-
-The system therefore treats **continuity and independence as explicit choices**.
-
-(editor note: how will foreman know when independent judgement is valuable?)
-
----
-
-# Director-Level UI
-
-The director should primarily see **task state and lifecycle**, not internal model reasoning.
-
-```text
-TASKS
-
-● Auth refactor       Engineer      143k   waiting validation
-● Cache redesign      Validator      82k   reviewing
-● API cleanup         —               0k   complete
-● UI migration        Engineer       61k   blocked
-
-FOREMAN
-4 active tasks
-1 awaiting validation
-1 blocked
-1 ready to close
-```
-
-The director interacts with the foreman and intervenes when judgment or priority is required.
-
-Implementation details remain inside task working memory.
-
----
-
-# Lifecycle Example
-
-```text
-DIRECTOR
-    │
-    │ "Implement caching layer"
-    ▼
-FOREMAN
-    │
-    │ create task
-    ▼
-TASK
-    │
-    │ role = Engineer
-    ▼
-WORKING MEMORY
-    │
-    ├── investigation
-    ├── implementation
-    ├── tests
-    └── user interaction
-    │
-   /done
-    │
-    ▼
-FOREMAN
-    │
-    ├── reuse working memory ──────► Validator
-    │
-    ├── fork working memory ───────► Independent Validator
-    │
-    └── continue Engineer
-    │
-    ▼
-VALIDATION
-    │
-   /fail ───────────────► Engineer
-    │
-   /pass
-    │
-    ▼
-TASK COMPLETE
-    │
-    ├── update task state
-    ├── produce durable artifacts
-    └── recycle working memory when appropriate
-    │
-    ▼
-FOREMAN
-    │
-    ▼
-DIRECTOR
-```
-
----
-
-# Design Principle
-
-> **Don't make agents persistent. Make the things worth remembering persistent.**
-
-The system should optimize separately for:
-
-- **working memory** — continuity and local reasoning
-- **task state** — durable organizational knowledge
-- **roles** — temporary cognitive modes
-- **threads** — bounded conversational processes
-- **foreman** — lifecycle and coordination
-- **director** — goals, priorities, and judgment
-
-The initial implementation should remain deliberately simple.
-
-Explicit lifecycle signals plus foreman decisions are sufficient to test whether this architecture produces a better balance of:
-
-- context continuity
-- independent judgment
-- token cost
-- rehydration cost
-- context-window pressure
-- validation quality
-- director-level visibility
+- What happens when work is approved? Do we merge? Who gets authority to merge?
