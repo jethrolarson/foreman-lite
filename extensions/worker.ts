@@ -15,12 +15,32 @@
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 type WorkerAction = "planned" | "done" | "flag";
+
+const SIGNAL_TOOL_NAME = "worker_signal";
+const MAX_NAGS_PER_RUN = 3;
+
+/**
+ * Did this run's messages include a call to the lifecycle-signal tool?
+ * Deliberately blunt: no attempt to distinguish "real work happened"
+ * from "trivial reply, signaling would be silly" — that's exactly the
+ * kind of judgment call to leave to the model/prompt, not encode as a
+ * heuristic here. If it turns out real usage needs an exception, add it
+ * then, with a reason, not preemptively.
+ */
+function calledWorkerSignal(messages: AgentMessage[]): boolean {
+	return messages.some(
+		(m) =>
+			m.role === "assistant" &&
+			m.content.some((c) => c.type === "toolCall" && c.name === SIGNAL_TOOL_NAME),
+	);
+}
 
 function taskEventsPath(worktreeRoot: string): string {
 	return join(worktreeRoot, ".task", "events.jsonl");
@@ -77,4 +97,46 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(buildWorkerSignalTool(pi));
+
+	// Turn-end enforcement: pi has no direct "stop hook" that can veto
+	// ending the run, so this uses the standard pi pattern instead (same
+	// one the bundled plan-mode extension uses) — inject a corrective
+	// message with triggerTurn: true on agent_end, which starts another
+	// run before the session is ever actually idle without a signal.
+	// Bounded by MAX_NAGS_PER_RUN so a genuinely stuck model doesn't loop
+	// forever; it settles (with a visible warning) instead of forcing.
+	let nagCount = 0;
+
+	pi.on("agent_start", () => {
+		nagCount = 0;
+	});
+
+	pi.on("agent_end", (event) => {
+		if (calledWorkerSignal(event.messages)) {
+			nagCount = 0;
+			return;
+		}
+
+		if (nagCount >= MAX_NAGS_PER_RUN) {
+			pi.sendMessage(
+				{
+					customType: "worker-signal-warning",
+					content: `Stopped without calling ${SIGNAL_TOOL_NAME} after ${MAX_NAGS_PER_RUN} reminders. Not forcing further — this needs a human look.`,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+			return;
+		}
+
+		nagCount += 1;
+		pi.sendMessage(
+			{
+				customType: "worker-signal-reminder",
+				content: `You stopped without calling ${SIGNAL_TOOL_NAME}. Every turn must end with planned, done, or flag — call it now.`,
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	});
 }
