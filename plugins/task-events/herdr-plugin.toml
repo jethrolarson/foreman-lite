@@ -1,0 +1,10 @@
+id = "foreman-lite.task-events"
+name = "Foreman Lite Task Events"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Push Task Thread lifecycle signals into the owning Foreman pane automatically, on herdr's own pane.agent_status_changed event."
+platforms = ["linux", "macos", "windows"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["node", "notify.mjs"]

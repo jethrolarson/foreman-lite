@@ -24,7 +24,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -37,6 +38,13 @@ interface TaskRecord {
 	worktreePath: string;
 	branch: string;
 	paneId: string;
+	// Which pane is running Foreman itself, i.e. process.env.HERDR_PANE_ID at
+	// the moment create_task ran. Read from Foreman's own inherited env, not
+	// configured — correct automatically since create_task only ever runs
+	// inside Foreman's own pi process. Undefined when not running under herdr
+	// (e.g. local dev without HERDR_ENV) — the task-events plugin has nothing
+	// to push to in that case and skips it.
+	foremanPaneId: string | undefined;
 	sessionPath: string | undefined;
 	createdAt: number;
 }
@@ -175,6 +183,32 @@ function writeTaskRecord(repoRoot: string, record: TaskRecord): void {
 	writeFileSync(join(dir, "meta.json"), `${JSON.stringify(record, null, 2)}\n`);
 }
 
+/**
+ * Global (cross-repo), keyed by pane id — the task-events herdr plugin
+ * looks tasks up by the pane_id it gets from pane.agent_status_changed,
+ * and it has no notion of "which repo" a pane belongs to. meta.json above
+ * stays repo-local for anything that only ever needs one repo's own tasks.
+ */
+function registryPath(): string {
+	return join(homedir(), ".foreman", "registry.json");
+}
+
+function readRegistry(): Record<string, TaskRecord> {
+	try {
+		return JSON.parse(readFileSync(registryPath(), "utf8"));
+	} catch {
+		return {};
+	}
+}
+
+function writeRegistryEntry(record: TaskRecord): void {
+	const path = registryPath();
+	mkdirSync(dirname(path), { recursive: true });
+	const registry = readRegistry();
+	registry[record.paneId] = record;
+	writeFileSync(path, `${JSON.stringify(registry, null, 2)}\n`);
+}
+
 // --- the tool -------------------------------------------------------------
 
 const createTaskTool = defineTool({
@@ -218,8 +252,18 @@ const createTaskTool = defineTool({
 			};
 		}
 
-		const record: TaskRecord = { id, repoRoot, worktreePath, branch, paneId, sessionPath, createdAt: Date.now() };
+		const record: TaskRecord = {
+			id,
+			repoRoot,
+			worktreePath,
+			branch,
+			paneId,
+			foremanPaneId: process.env.HERDR_PANE_ID,
+			sessionPath,
+			createdAt: Date.now(),
+		};
 		writeTaskRecord(repoRoot, record);
+		writeRegistryEntry(record);
 
 		return {
 			content: [
