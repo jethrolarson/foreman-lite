@@ -84,9 +84,9 @@ function runHerdr(args: string[]): Record<string, unknown> {
 	try {
 		stdout = execFileSync("herdr", args, { encoding: "utf8" });
 	} catch (error) {
-		// herdr prints its JSON error body to stdout even on nonzero exit.
-		const maybeStdout = (error as { stdout?: Buffer | string })?.stdout?.toString();
-		const parsedError = maybeStdout ? tryParseHerdrError(maybeStdout) : undefined;
+		// herdr prints its JSON error body to stderr on nonzero exit (not stdout).
+		const maybeStderr = (error as { stderr?: Buffer | string })?.stderr?.toString();
+		const parsedError = maybeStderr ? tryParseHerdrError(maybeStderr) : undefined;
 		if (parsedError) {
 			throw new HerdrError(`herdr ${args.join(" ")} failed: ${parsedError.message}`, parsedError.code);
 		}
@@ -200,6 +200,7 @@ const createTaskTool = defineTool({
 		} catch (error) {
 			return {
 				content: [{ type: "text", text: `Failed to create worktree: ${String(error)}` }],
+				details: undefined,
 				isError: true,
 			};
 		}
@@ -212,6 +213,7 @@ const createTaskTool = defineTool({
 				content: [
 					{ type: "text", text: `Worktree created (${worktreePath}) but failed to start Worker: ${String(error)}` },
 				],
+				details: undefined,
 				isError: true,
 			};
 		}
