@@ -53,8 +53,9 @@ Verifies work planned or completed by the Worker agent. What that means is conte
 
 - /approve - Approve work
 - /deny [context] - Send work back to Worker for changes
-- /flag - Raise concern to the human when it seems like the worker is malfunctioning or if there's some large risk identified that the worker agent is unlikely to be able to resolve.
+- /flag - Raise concern to the foreman when it seems like the worker is malfunctioning or if there's some large risk identified that the worker agent is unlikely to be able to resolve.
 
 # Open questions
 
 - What happens when work is approved? Do we merge? Who gets authority to merge?
+- Should we bring back the /recycle command which would allow foreman to decide when to compact?

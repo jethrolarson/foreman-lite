@@ -1,6 +1,0 @@
-{
-  "name": "foreman-lite",
-  "displayName": "Foreman Lite",
-  "description": "Task-oriented agent orchestration: durable task state, disposable working memory, ephemeral roles.",
-  "version": "0.1.0"
-}
