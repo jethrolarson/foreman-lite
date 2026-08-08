@@ -109,28 +109,38 @@ was actually run.
 
 ## Files that exist right now
 
-- `extensions/foreman.ts` — **STALE, not yet rewritten against herdr.**
-  Currently still contains the original raw-tmux implementation
-  (`execFileSync("tmux", ...)`, `git worktree add` as a sibling dir,
-  `.foreman/tasks/<id>/meta.json` + `prompt.md`). This was tested and
-  confirmed working *before* the herdr discovery. Rewriting it to use
-  `herdr worktree create` + `herdr agent start --kind pi -- ...` (passing
-  `extensions/worker.ts`'s path via an `-e` arg baked into that argv) is
-  the immediate next step. Keep the task-id/branch-naming pure helpers
-  (`slugify`, `taskId`, `branchFor`) — those don't change. Drop
-  `workerShellCommand`/`shellQuote`/`ensureTmuxSession`/`tmuxSessionExists`
-  — herdr replaces all of it. Decide whether `.foreman/tasks/<id>/meta.json`
-  is still needed (herdr's own `agent get <name>` may cover most of it,
-  but herdr's name→agent mapping clears when the process exits, so some
-  durable record of task→worktree-path is probably still worth keeping
-  for resuming after a Worker pane dies).
-- `extensions/worker.ts` — written and building cleanly this session
-  (fixed a module-level-mutable-`pi` code smell before checkpointing;
-  current version closes over `pi` properly). **Not yet tested
-  end-to-end as a real `-e` argument passed through `herdr agent start`**
-  — the manual herdr verification above used an ad hoc test tool
-  (`/tmp/herdr-blocked-test.ts`, not this file) to confirm the
-  `herdr:blocked` mechanism. `worker.ts` itself hasn't been run yet.
+- `extensions/foreman.ts` — **rewritten against herdr, tested end-to-end
+  and working.** `create_task` now calls `herdr worktree create` +
+  `herdr agent start --kind pi -- -e <worker.ts path> <prompt>`. Verified
+  live: real pi session spawned, `worker.ts` loaded in it (confirmed via
+  `herdr agent read`), `.foreman/tasks/<id>/meta.json` written with real
+  herdr pane/session data. Dropped `workerShellCommand`/`shellQuote`/
+  `ensureTmuxSession`/`tmuxSessionExists`/`tmuxSessionFor`/`tmuxWindowFor`
+  entirely — no shell strings anywhere now, herdr's `--` argv is passed
+  as a real array. Kept `slugify`/`taskId`/`branchFor`. `meta.json` kept
+  deliberately (id, repoRoot, worktreePath, branch, paneId, sessionPath,
+  createdAt) since herdr's name→agent mapping clears when the process
+  exits — this is the durable record for resuming after a Worker pane dies.
+  **Real bug found and fixed during testing**: `agent start` called
+  immediately after `worktree create` intermittently fails with
+  `agent_pane_busy` — reproduced with zero delay, confirmed transient
+  (a 1s sleep fixes it). Fixed with a bounded retry
+  (`runHerdrRetryingPaneBusy`, 5 attempts / 500ms) keyed off that specific
+  error code rather than a blind sleep everywhere. If you see
+  `agent_pane_busy` surface anywhere else later, this is why, and the
+  same retry pattern applies.
+- `extensions/worker.ts` — written, builds cleanly, **now verified
+  end-to-end for real** (not just the ad hoc test tool from before): a
+  Worker spawned via `create_task` loaded it correctly (`herdr agent
+  read` showed `[Extensions] herdr-agent-state.ts, worker.ts`). One
+  observation, not a bug: the Worker answered a trivial prompt in plain
+  text instead of calling `worker_signal` — expected, since nothing
+  enforces the tool call yet (see next steps #2, turn-end enforcement
+  hook). The `flag`→`herdr:blocked` mechanism itself was separately
+  confirmed working earlier this session via the ad hoc test tool, not
+  yet re-confirmed through `worker.ts` specifically with a live blocked
+  scenario — worth a real test once the enforcement hook exists to force
+  the model to actually call it.
   Writes domain-level lifecycle events to `<worktree>/.task/events.jsonl`
   — this is real Task State per vision.md's definition (file state in the
   worktree, shared/readable by worker and verifier), not just an herdr
@@ -140,16 +150,17 @@ was actually run.
 
 ## Next steps, in order
 
-1. Rewrite `extensions/foreman.ts`'s `create_task` against herdr (see
-   above). Test end-to-end against a scratch repo the same way the tmux
-   version was tested earlier this session — don't skip that, both the
-   tmux version and the herdr primitives were independently verified,
-   but the *combination* (create_task actually invoking herdr, with
-   worker.ts as the spawned `-e`) has not been.
+1. Build the turn-end enforcement hook (an `agent_end`/`turn_end`
+   extension event in `worker.ts` requiring the last tool call to be
+   `worker_signal`) — this is now the actual blocker to trusting the
+   Worker loop at all, demonstrated directly above (model answered in
+   plain text instead of signaling).
 2. Add `halt_worker` to `foreman.ts` (`herdr agent send-keys <name> esc`
    is the leading candidate, unverified).
-3. Test `worker.ts`'s `flag`/`done`/`planned` for real, spawned through
-   `create_task`, not the ad hoc test tool.
+3. With the enforcement hook in place, re-test `worker_signal`'s
+   `flag`/`done`/`planned` for real through a live task (the
+   `herdr:blocked` mechanism itself is confirmed working, just not yet
+   forced through a real model turn).
 4. Verifier doesn't exist yet at all — no extension, no spawn-on-`/done`
    wiring, no `/approve`/`/deny` tool. This is the next major piece after
    Worker is solid.
