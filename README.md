@@ -32,11 +32,11 @@ herdr plugin link /path/to/foreman-lite/plugins/task-events
 
 ## Run
 
-From your project's repo root, inside a herdr pane:
+`bin/foreman` resolves its own paths, so run it from your project's repo root,
+inside a herdr pane (extra args pass through to pi):
 
 ```sh
-pi -e /path/to/foreman-lite/extensions/foreman.ts \
-    --skill /path/to/foreman-lite/skills/foreman
+foreman-lite/bin/foreman            # or add bin/ to PATH / alias it
 ```
 
 Then just ask Foreman to do things — "add a feature X", "fix the bug in Y". It

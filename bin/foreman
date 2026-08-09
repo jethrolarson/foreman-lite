@@ -1,0 +1,6 @@
+#!/bin/sh
+# Launch Foreman from the target project's repo root (inside a herdr pane).
+# Computes paths relative to this script, so it works from anywhere.
+# Extra args pass through to pi (e.g. --provider zai --model glm-5.2).
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+exec pi -e "$HERE/extensions/foreman.ts" --skill "$HERE/skills/foreman" "$@"
