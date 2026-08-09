@@ -142,7 +142,8 @@ const err = (message: string, code?: string): Result<never> =>
 function herdrErrorFromStderr(stderr: string): HerdrError {
   try {
     const parsed = JSON.parse(stderr);
-    if (parsed?.error) return { message: parsed.error.message, code: parsed.error.code };
+    if (parsed?.error)
+      return { message: parsed.error.message, code: parsed.error.code };
   } catch {
     // not JSON — use the raw stderr below
   }
@@ -155,7 +156,9 @@ function runHerdr(args: string[]): Result<Record<string, unknown>> {
     stdout = execFileSync("herdr", args, { encoding: "utf8" });
   } catch (error) {
     // herdr prints its JSON error body to stderr on nonzero exit (not stdout).
-    const maybeStderr = (error as { stderr?: Buffer | string })?.stderr?.toString();
+    const maybeStderr = (
+      error as { stderr?: Buffer | string }
+    )?.stderr?.toString();
     if (maybeStderr) {
       const e = herdrErrorFromStderr(maybeStderr);
       return err(`herdr ${args.join(" ")} failed: ${e.message}`, e.code);
