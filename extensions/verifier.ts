@@ -115,12 +115,9 @@ export default function (pi: ExtensionAPI) {
 
   // Same turn-end enforcement as worker.ts: a Verifier that goes idle
   // without a verdict is a stuck review, so nag (bounded) rather than
-  // settle silently.
+  // settle silently. Don't reset nagCount on agent_start — the nag's own
+  // followUp triggers one, which would defeat the bound.
   let nagCount = 0;
-
-  pi.on("agent_start", () => {
-    nagCount = 0;
-  });
 
   pi.on("agent_end", (event) => {
     if (calledVerifierSignal(event.messages)) {

@@ -171,6 +171,20 @@ function promptPane(paneId, text) {
   }
 }
 
+// Tolerant current-status check for debouncing. Returns undefined on any error
+// (e.g. agent momentarily not found) rather than throwing.
+function agentStatus(paneId) {
+  const result = spawnSync(HERDR_BIN, ["agent", "get", paneId], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return undefined;
+  try {
+    return JSON.parse(result.stdout).result.agent.agent_status;
+  } catch {
+    return undefined;
+  }
+}
+
 function verifierExtensionPath() {
   // extensions/verifier.ts, relative to this plugin file's location.
   const here = dirname(fileURLToPath(import.meta.url));
@@ -342,6 +356,18 @@ if (!task) {
 }
 
 const lastEvent = lastTaskEvent(task.worktreePath);
+
+// A Worker going idle with no signal is ambiguous: the nag hook may be
+// re-triggering a turn, so the pane flickers idle between agent_end and the
+// followUp. Debounce — if it's working again shortly after, it's a flicker,
+// not a stuck worker; exit without marking so a later real push can fire.
+// Real signals (lastEvent set) push immediately.
+if (task.role === "worker" && !lastEvent && status === "idle") {
+  await sleep(3000);
+  const current = agentStatus(paneId);
+  if (current && current !== "idle") process.exit(0);
+}
+
 const key = dedupeKey(task, lastEvent);
 if (alreadyPushed(key)) {
   process.exit(0);

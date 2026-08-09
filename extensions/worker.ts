@@ -129,11 +129,11 @@ export default function (pi: ExtensionAPI) {
   // run before the session is ever actually idle without a signal.
   // Bounded by MAX_NAGS_PER_RUN so a genuinely stuck model doesn't loop
   // forever; it settles (with a visible warning) instead of forcing.
+  // NOTE: do NOT reset nagCount on agent_start — the nag's own followUp
+  // triggers an agent_start, which would reset the count and make the bound
+  // unreachable (verified: caused an infinite nag loop in dogfooding).
+  // Reset only when a signal is actually called (new work cycle).
   let nagCount = 0;
-
-  pi.on("agent_start", () => {
-    nagCount = 0;
-  });
 
   pi.on("agent_end", (event) => {
     if (calledWorkerSignal(event.messages)) {
