@@ -1,6 +1,15 @@
 #!/bin/sh
 # Launch Foreman from the target project's repo root (inside a herdr pane).
-# Computes paths relative to this script, so it works from anywhere.
-# Extra args pass through to pi (e.g. --provider zai --model glm-5.2).
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
+# Computes paths relative to this script, so it works from anywhere —
+# including when invoked via PATH or a symlink. Extra args pass through to
+# pi (e.g. --provider zai --model glm-5.2).
+src="$0"
+# Bare name (invoked via PATH): resolve to the actual path.
+case "$src" in
+  */*) ;;
+  *) src="$(command -v "$src" 2>/dev/null || echo "$src")" ;;
+esac
+# Resolve symlinks.
+while [ -L "$src" ]; do src="$(readlink "$src")"; done
+HERE="$(cd "$(dirname "$src")/.." && pwd)"
 exec pi -e "$HERE/extensions/foreman.ts" --skill "$HERE/skills/foreman" "$@"

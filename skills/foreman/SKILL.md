@@ -45,9 +45,17 @@ herdr agent read <name|paneId>           # recent pane output
 herdr agent attach <name|paneId>         # drop in interactively (Ctrl-D to leave)
 herdr agent prompt <name|paneId> <text>  # message an agent
 herdr agent send-keys <name|paneId> esc  # interrupt a turn
-herdr worktree remove --workspace <id> --force   # tear down a worktree+pane
+herdr worktree remove --workspace <wid> --force  # tear down (wid = workspace id, e.g. w28)
 ```
 
-- HAZARD: `herdr agent prompt` rejects multi-line or quoted text ("cannot be encoded safely for the target shell"). Keep prompts single-line, strip quotes. CONTEXT: found in herdr plugin logs during Verifier-spawn testing.
+- HAZARD: `herdr agent prompt` rejects multi-line or quoted text ("cannot
+  be encoded safely for the target shell"). Keep prompts single-line, strip
+  quotes. CONTEXT: found in herdr plugin logs during Verifier-spawn testing.
+  (`create_task`/Verifier spawns pass the prompt via `@file` to dodge this —
+  if you prompt a pane yourself, you don't get that.)
+- CONTEXT: `worktree remove --workspace` takes a **workspace id** (`w28`),
+  not the task name. Derive it from a pane id (`w28:p1` → `w28`) or find it
+  via `herdr workspace list`. Every task you create is in `~/.foreman/registry.json`
+  keyed by pane id, so look up the pane id there first — don't guess.
 
 The human can `herdr agent attach` any thread directly — the intended drill-down path; you don't have to relay everything.

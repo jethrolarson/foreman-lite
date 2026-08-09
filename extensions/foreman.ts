@@ -71,12 +71,13 @@ function slugify(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
+    .replace(/^-+|-+$/g, "");
 }
 
 function taskId(name: string, suffix: string): string {
-  const slug = slugify(name);
+  // herdr agent names are capped at 32 chars; slug is truncated to leave room
+  // for the `-<suffix>` (suffix is Date.now().toString(36), 8 chars + hyphen).
+  const slug = slugify(name).slice(0, 23);
   return slug ? `${slug}-${suffix}` : suffix;
 }
 
@@ -221,16 +222,19 @@ function createWorktree(
 
 // Forward Foreman's provider/model so Workers don't fall back to defaults
 // that may diverge or point at a stale key (caused mid-task auth exits).
+// The prompt goes via @file, not a shell arg — herdr shell-encodes `agent
+// start -- <argv>` for the target pane and rejects multi-line/quoted prompts
+// (a real failure in dogfooding). @file is lossless and encodes as a safe path.
 function workerAgentArgs(
   name: string,
   paneId: string,
-  prompt: string,
+  promptFile: string,
 ): string[] {
   const piFlags: string[] = ["-e", workerExtensionPath()];
   if (process.env.PI_PROVIDER)
     piFlags.push("--provider", process.env.PI_PROVIDER);
   if (process.env.PI_MODEL) piFlags.push("--model", process.env.PI_MODEL);
-  piFlags.push(prompt);
+  piFlags.push(`@${promptFile}`);
   return [
     "agent",
     "start",
@@ -239,9 +243,18 @@ function workerAgentArgs(
     "pi",
     "--pane",
     paneId,
+    "--timeout",
+    "4000",
     "--",
     ...piFlags,
   ];
+}
+
+function writePromptFile(id: string, prompt: string): string {
+  const path = join(homedir(), ".foreman", "prompts", `${id}.txt`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, prompt);
+  return path;
 }
 
 async function startWorkerAgent(
@@ -249,13 +262,21 @@ async function startWorkerAgent(
   paneId: string,
   prompt: string,
 ): Promise<Result<{ sessionPath: string | undefined }>> {
+  const promptFile = writePromptFile(name, prompt);
   const r = await runHerdrRetryingPaneBusy(
-    workerAgentArgs(name, paneId, prompt),
+    workerAgentArgs(name, paneId, promptFile),
   );
-  if (!r.ok) return fail(r.error);
-  const agent = (r.value as { agent: { agent_session?: { value?: string } } })
-    .agent;
-  return ok({ sessionPath: agent?.agent_session?.value });
+  if (r.ok) {
+    const agent = (r.value as { agent: { agent_session?: { value?: string } } })
+      .agent;
+    return ok({ sessionPath: agent?.agent_session?.value });
+  }
+  // herdr's pi-readiness wait is unreliable (times out even when pi launches
+  // fine). Don't block on it or poll — the task is registered, and the
+  // task-events plugin pushes the Worker's real state transitions to Foreman.
+  // Only a non-timeout error is a real failure.
+  if (r.error.code === "timeout") return ok({ sessionPath: undefined });
+  return fail(r.error);
 }
 
 // `esc` interrupts the current turn; the pane/worktree stay for resuming.
@@ -352,20 +373,10 @@ const createTaskTool = defineTool({
     }
     const { paneId, worktreePath } = wt.value;
 
-    const started = await startWorkerAgent(id, paneId, params.prompt);
-    if (!started.ok) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Worktree created (${worktreePath}) but failed to start Worker: ${started.error.message}`,
-          },
-        ],
-        details: undefined,
-        isError: true,
-      };
-    }
-
+    // Register BEFORE starting the agent so the task is tracked even if agent
+    // start reports a timeout (herdr's pi-readiness wait is unreliable). The
+    // task-events plugin pushes the Worker's real transitions to Foreman, so
+    // create_task needn't confirm startup — and never orphans the worktree.
     const record: WorkerRecord = {
       id,
       repoRoot,
@@ -377,17 +388,36 @@ const createTaskTool = defineTool({
       provider: process.env.PI_PROVIDER,
       model: process.env.PI_MODEL,
       foremanPaneId: process.env.HERDR_PANE_ID,
-      sessionPath: started.value.sessionPath,
+      sessionPath: undefined,
       createdAt: Date.now(),
     };
     writeTaskRecord(repoRoot, record);
     writeRegistryEntry(record);
 
+    const started = await startWorkerAgent(id, paneId, params.prompt);
+    if (!started.ok) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Task ${id} registered (pane ${paneId}, worktree ${worktreePath}) but Worker failed to start: ${started.error.message}. The task is tracked — halt or clean it up via the registry.`,
+          },
+        ],
+        details: record,
+        isError: true,
+      };
+    }
+    if (started.value.sessionPath) {
+      record.sessionPath = started.value.sessionPath;
+      writeTaskRecord(repoRoot, record);
+      writeRegistryEntry(record);
+    }
+
     return {
       content: [
         {
           type: "text",
-          text: `Created task ${id}. Worker running in pane ${paneId}, worktree ${worktreePath}. Attach with: herdr agent attach ${id}`,
+          text: `Created task ${id} in pane ${paneId}, worktree ${worktreePath}. The Worker is starting; you'll get a pushed signal when it reports planned/done/flag. Attach with: herdr agent attach ${paneId}`,
         },
       ],
       details: record,

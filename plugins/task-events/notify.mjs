@@ -143,9 +143,11 @@ async function runHerdr(args, { retryPaneBusy = false } = {}) {
       await sleep(500);
       continue;
     }
-    throw new Error(
+    const e = new Error(
       `herdr ${args.join(" ")} failed: ${err?.message ?? result.stderr?.trim()}`,
     );
+    e.code = err?.code;
+    throw e;
   }
 }
 
@@ -177,18 +179,35 @@ function verifierExtensionPath() {
 
 function buildVerifierPrompt(task, event) {
   // Role framing is injected by verifier.ts's system-prompt hook; this is
-  // just the per-task review context. Single line, quotes stripped: herdr
-  // shell-encodes `agent start -- <argv>` and rejects multi-line/quoted.
-  const request = task.prompt.replace(/\s+/g, " ").replace(/["'`]/g, "");
-  const context = event.context.replace(/\s+/g, " ").replace(/["'`]/g, "");
-  return `Task ${task.id}. Original request: ${request}. Worker signal: ${event.action} - ${context}. Review the work against the request and verifier_signal.`;
+  // just the per-task review context. Passed via @file (see spawnVerifier) so
+  // newlines/quotes in the worker's context don't trip herdr's shell encoder.
+  return [
+    `Task ${task.id}.`,
+    `Original request: ${task.prompt}`,
+    `Worker signal: ${event.action} — ${event.context}`,
+    "",
+    "Review the work in this repo against the request: read the changes, run tests, re-check the spec. Do not implement fixes yourself — a deny sends it back to the Worker.",
+    "Then call verifier_signal: approve (work is correct), deny (with what to fix), or flag (raise a concern to Foreman).",
+  ].join("\n");
+}
+
+function writeVerifierPromptFile(task, event) {
+  const dir = join(homedir(), ".foreman", "prompts");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${task.id}-verifier-${Date.now().toString(36)}.txt`);
+  writeFileSync(path, buildVerifierPrompt(task, event));
+  return path;
 }
 
 // Spawn a Verifier pane in the Worker's own worktree (so it sees the real
 // changes), seed it, and register it so its own signals route back. Returns
 // the verifier pane id, or undefined on failure.
 async function spawnVerifier(task, event) {
-  const verifierId = `${task.id}-verifier`;
+  // Verifier agent name is a short unique handle (herdr caps names at 32
+  // chars, and `${task.id}-verifier` overflows). The registry links the
+  // verifier pane back to the task via workerPaneId, so the name needn't
+  // encode the task id — `herdr agent list` shows the worktree cwd for that.
+  const verifierId = `vf-${Date.now().toString(36)}`;
   let paneId;
   try {
     const result = await runHerdr([
@@ -213,7 +232,7 @@ async function spawnVerifier(task, event) {
   const piFlags = ["-e", verifierExtensionPath()];
   if (task.provider) piFlags.push("--provider", task.provider);
   if (task.model) piFlags.push("--model", task.model);
-  piFlags.push(buildVerifierPrompt(task, event));
+  piFlags.push(`@${writeVerifierPromptFile(task, event)}`);
 
   try {
     await runHerdr(
@@ -225,18 +244,25 @@ async function spawnVerifier(task, event) {
         "pi",
         "--pane",
         paneId,
+        "--timeout",
+        "4000",
         "--",
         ...piFlags,
       ],
       { retryPaneBusy: true },
     );
   } catch (error) {
-    console.error(`spawnVerifier agent start failed: ${error.message}`);
-    promptPane(
-      task.foremanPaneId,
-      `Task ${task.id}: Verifier pane created (${paneId}) but agent failed to start (${error.message}).`,
-    );
-    return undefined;
+    // herdr's pi-readiness wait is unreliable — a timeout usually means the
+    // Verifier is starting fine. Only a real (non-timeout) error is a failure;
+    // either way the pane exists and the plugin will push the Verifier's signals.
+    if (error.code !== "timeout") {
+      console.error(`spawnVerifier agent start failed: ${error.message}`);
+      promptPane(
+        task.foremanPaneId,
+        `Task ${task.id}: Verifier pane created (${paneId}) but agent failed to start (${error.message}).`,
+      );
+      return undefined;
+    }
   }
 
   const verifierEntry = {
