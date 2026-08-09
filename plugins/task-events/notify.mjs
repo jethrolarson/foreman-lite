@@ -240,7 +240,11 @@ async function spawnVerifier(task, event) {
     console.error(`spawnVerifier pane split failed: ${error.message}`);
     await promptPane(
       task.foremanPaneId,
-      `Task ${task.id}: failed to spawn Verifier (${error.message}). Review manually.`,
+      signalEnvelope(
+        "foreman-signal",
+        { source: "system", task: task.id, status: "error" },
+        `Failed to spawn Verifier (${error.message}). Review manually.`,
+      ),
     );
     return undefined;
   }
@@ -280,7 +284,11 @@ async function spawnVerifier(task, event) {
       console.error(`spawnVerifier agent start failed: ${error.message}`);
       await promptPane(
         task.foremanPaneId,
-        `Task ${task.id}: Verifier pane created (${paneId}) but agent failed to start (${error.message}).`,
+        signalEnvelope(
+          "foreman-signal",
+          { source: "system", task: task.id, status: "error" },
+          `Verifier pane created (${paneId}) but agent failed to start (${error.message}).`,
+        ),
       );
       return undefined;
     }
@@ -307,33 +315,28 @@ async function spawnVerifier(task, event) {
   return paneId;
 }
 
-function describeWorkerSignal(event) {
-  if (!event)
-    return "went idle with no recorded signal (worker.ts enforcement should prevent this)";
-  switch (event.action) {
-    case "planned":
-      return `plan ready for review: ${event.context}`;
-    case "done":
-      return `work ready for review: ${event.context}`;
-    case "flag":
-      return `blocked, needs input: ${event.context}`;
-    default:
-      return `unrecognized signal: ${JSON.stringify(event)}`;
-  }
+// Plugin-pushed messages arrive as user-role text, so a sub-agent signal is
+// indistinguishable from the human speaking unless we mark it. The
+// `::foreman-signal::` / `::directive::` header is the contract the Foreman
+// and Worker roles key on (see roles/*.md): header line = machine fields,
+// following lines = human-readable detail. Without it the Foreman replies to
+// verifier reports as if the human's message got cut off.
+function signalEnvelope(tag, fields, detail) {
+  const head = [
+    `::${tag}::`,
+    ...Object.entries(fields).map(([k, v]) => `${k}=${v}`),
+  ].join(" ");
+  return detail ? `${head}\n${detail}` : head;
 }
 
-function describeVerifierSignal(event) {
+function workerDetail(event) {
+  if (!event) return "went idle with no recorded signal";
+  return event.context ?? "(no detail)";
+}
+
+function verifierDetail(event) {
   if (!event) return "went idle with no recorded verdict";
-  switch (event.action) {
-    case "approve":
-      return `approved: ${event.context}`;
-    case "deny":
-      return `denied, sent back to Worker: ${event.context}`;
-    case "flag":
-      return `concern raised: ${event.context}`;
-    default:
-      return `unrecognized verdict: ${JSON.stringify(event)}`;
-  }
+  return event.context ?? "(no detail)";
 }
 
 // --- main ----------------------------------------------------------------
@@ -394,14 +397,27 @@ if (!task.foremanPaneId) {
 }
 
 if (task.role === "worker") {
-  const describe = `Task ${task.id} (${status}): ${describeWorkerSignal(lastEvent)}`;
+  const describe = signalEnvelope(
+    "foreman-signal",
+    {
+      source: "worker",
+      task: task.id,
+      status,
+      signal: lastEvent?.action ?? "none",
+    },
+    workerDetail(lastEvent),
+  );
   if (task.foremanPaneId) await promptPane(task.foremanPaneId, describe);
 
   if (lastEvent && VERIFIER_ACTIONS.has(lastEvent.action)) {
     if (task.verifierPaneId) {
       await promptPane(
         task.verifierPaneId,
-        `Worker ${lastEvent.action}: ${lastEvent.context}. Review again and verifier_signal.`,
+        signalEnvelope(
+          "directive",
+          { source: "worker", task: task.id, signal: lastEvent.action },
+          `Worker ${lastEvent.action}: ${lastEvent.context}. Review again and verifier_signal.`,
+        ),
       );
     } else {
       await spawnVerifier(task, lastEvent);
@@ -411,13 +427,26 @@ if (task.role === "worker") {
 }
 
 if (task.role === "verifier") {
-  const describe = `Task ${task.id} verifier (${status}): ${describeVerifierSignal(lastEvent)}`;
+  const describe = signalEnvelope(
+    "foreman-signal",
+    {
+      source: "verifier",
+      task: task.id,
+      status,
+      verdict: lastEvent?.action ?? "none",
+    },
+    verifierDetail(lastEvent),
+  );
   if (task.foremanPaneId) await promptPane(task.foremanPaneId, describe);
 
   if (lastEvent?.action === "deny" && task.workerPaneId) {
     await promptPane(
       task.workerPaneId,
-      `Verifier denied: ${lastEvent.context}. Address this and worker_signal done when ready.`,
+      signalEnvelope(
+        "directive",
+        { source: "verifier", task: task.id, verdict: "deny" },
+        `Verifier denied: ${lastEvent.context}. Address this and worker_signal done when ready.`,
+      ),
     );
   }
   process.exit(0);
