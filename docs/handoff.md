@@ -43,8 +43,44 @@ better than what was originally planned (Foreman polling).
   looked like it worked because the error handling still returned
   cleanly). Both bugs found by actually running it repeatedly, not by
   reasoning about it.
-- `halt_worker` **not built yet**. Candidate: `herdr agent send-keys
-  <name> esc`. Untried.
+- `flag` tool: Foreman's flag-to-human — sends a native OS
+  notification (`osascript display notification` on macOS,
+  `notify-send` on Linux; graceful no-op elsewhere). Foreman is the only
+  role that talks to the human directly, so only it gets this. **Verified
+  live** (LLM called the tool, `osascript` exited 0, notification posted).
+  Foreman decides when to invoke it — e.g. a Worker/Verifier `flag` it
+  can't resolve itself, or any decision only the human can make.
+- `halt_worker` tool: `herdr agent send-keys <id> esc`. Target is the
+  agent name, which `create_task` sets equal to the task id, so no
+  pane-id lookup is needed — reads `meta.json` only to give a clean
+  "no such task" error rather than letting herdr's own `agent_not_found`
+  leak through. **Verified live, cleanly, and the semantics are the good
+  ones:** `esc` interrupts the Worker's current turn (the running tool
+  call aborts with "Command aborted" / "This operation was aborted")
+  but the pi process stays alive and is resumable — confirmed by sending
+  a follow-up `herdr agent prompt` afterward and watching it resume
+  "Working...". The `worker.ts` turn-end nag hook fires correctly on the
+  aborted turn, and the Worker then calls `worker_signal`. So halt means
+  "interrupt this turn, pane/worktree kept, Worker can be prompted
+  again" — exactly what vision.md wants, not a kill.
+  
+  (Side note on how this was confirmed, worth keeping because the first
+  test attempt was confounded: a Worker spawned via `create_task`
+  disappeared on its own *without* any `esc`, both in the original
+  session and reproduced now — root cause was that `create_task` passed
+  `-e worker.ts <prompt>` with **no `--provider`/`--model`**, so the
+  Worker used defaults, and the default `zai`/`glm-5.2` key was 401'ing
+  mid-session (`pi auth check --provider zai` says "ready" but fresh
+  `pi` subprocesses hit `authentication_error` and the interactive
+  process exits). The clean esc test used an explicit
+  `--provider zai --model glm-5.2` Worker, which stayed stable through
+  esc and a follow-up prompt. **Fixed:** `create_task` now forwards
+  `PI_PROVIDER`/`PI_MODEL` from Foreman's env into the `agent start --`
+  argv, and stashes them in the registry so the task-events plugin can
+  spawn Verifiers with the same provider/model (the plugin process
+  doesn't inherit pi's env). Verified: a `create_task`-spawned Worker
+  ran a 30s task to completion and accepted a follow-up prompt, no
+  auth-exit.)
 
 ### `extensions/worker.ts` — Worker's capability
 - `worker_signal` tool: `planned` / `done` / `flag`. Writes to
@@ -70,6 +106,22 @@ better than what was originally planned (Foreman polling).
     branch itself (hard to force a model to stonewall on purpose).
     Implemented, untested.
 
+### `extensions/verifier.ts` — Verifier's capability
+- `verifier_signal` tool: `approve` / `deny` / `flag`. Same shape as
+  `worker_signal`: appends to the shared `<worktree>/.task/events.jsonl`
+  with `role: "verifier"` (Worker stamps `role: "worker"`), emits
+  `herdr:blocked` for `flag`. `terminate: true` ends the turn.
+- Same turn-end nag hook as worker.ts (`MAX_NAGS_PER_RUN = 3`): a
+  Verifier that goes idle without a verdict is a stuck review.
+- **Verified live, all three verdicts**: `approve` (full chain — Worker
+  done → plugin spawned Verifier → Verifier reviewed → approved →
+  Foreman notified); `deny` (corrupted the Worker's file before the
+  Verifier read it → Verifier caught the mismatch, denied → plugin
+  re-prompted the Worker, which resumed `working`); `flag` (asked the
+  Verifier to falsely deny already-approved correct work → it refused
+  and flagged instead, validating both the `flag` routing *and* the
+  prompt guideline against rubber-stamping).
+
 ### `plugins/task-events/` — the automatic-notification piece
 This is a **herdr plugin**, a different kind of artifact than the pi
 extensions above — a directory with `herdr-plugin.toml` + `notify.mjs`,
@@ -81,19 +133,29 @@ deliver automatic awareness — nothing wakes an idle LLM session between
 your messages to make it check. This was the actual decision point this
 session; see "Key decisions" below.
 
-**How it works**: herdr fires `pane.agent_status_changed` for *every*
-pane on the machine (confirmed via `herdr api schema --json` and a real
-reference plugin, `ogulcancelik/herdr-plugin-examples/agent-telegram-notify`,
-which uses the identical event). `notify.mjs`:
+**How it works** (now role-aware, routing both Worker and Verifier
+signals): herdr fires `pane.agent_status_changed` for *every* pane on
+the machine. `notify.mjs`:
 1. Reads `HERDR_PLUGIN_EVENT_JSON.data.{pane_id,agent_status}`.
-2. No-ops immediately for `working`/`unknown` (only reacts to
-   `idle`/`blocked`/`done`), and no-ops for any pane not in
-   `~/.foreman/registry.json` (i.e. every other agent on the machine, not
-   ours).
-3. Looks up the task, reads the last line of its
-   `.task/events.jsonl`, and pushes `herdr agent prompt <foremanPaneId>
-   "Task <id> (<status>): <signal>"` — landing directly in Foreman's
-   conversation with no polling and no manual step.
+2. No-ops for `working`/`unknown` and for panes not in
+   `~/.foreman/registry.json`.
+3. Looks up the task, reads the last line of `.task/events.jsonl`.
+4. Routes by the pane's registry `role`:
+   - **Worker** `planned`/`done` → notify Foreman **and** ensure a
+     Verifier exists for the task: spawn one on first review (new pane
+     in the *same* worktree via `herdr workspace create --cwd
+     <worktree>` + `herdr agent start ... -e verifier.ts <prompt>`), or
+     re-prompt the existing one. `flag` → notify Foreman only.
+   - **Verifier** `approve`/`flag` → notify Foreman. `deny` → notify
+     Foreman **and** prompt the Worker to fix and re-signal `done`.
+
+Verifier spawn writes a second registry entry (`role: "verifier"`,
+linked back to the worker pane via `workerPaneId`; the worker entry gets
+`verifierPaneId`) so the Verifier's own status changes route correctly
+and later reviews re-prompt instead of re-spawning. The Verifier prompt
+is a single line with quotes stripped — herdr shell-encodes `agent
+start -- <argv>` for the target pane and rejects multi-line/quoted
+prompts as unsafe (real failure, found in plugin logs).
 
 **Verified end-to-end, repeatedly, with a real dummy-Foreman pane** (a
 second pi agent standing in for Foreman, `HERDR_PANE_ID` overridden on
@@ -211,23 +273,14 @@ fine to delete between test runs.
 
 ## Next steps, in order
 
-1. `halt_worker` tool in `foreman.ts` (`herdr agent send-keys <name>
-   esc`, unverified candidate).
-2. Verifier — nothing exists yet: no extension, no spawn-on-`/done`
-   wiring, no `/approve`/`/deny` tool. This is the next major piece.
-   Likely shape, not yet validated: spawned via `herdr agent start` into
-   a **new pane in the same worktree** (not a new worktree — Verifier
-   needs to see the Worker's actual changes), triggered by the
-   task-events plugin itself reacting to a `done` signal specifically
-   (it already has all the pieces: task lookup, domain signal read — it
-   currently only *notifies* Foreman, but spawning the Verifier
-   automatically at that same point instead of/in addition to notifying
-   is a small extension of what's already built, not a new mechanism).
-3. Update this file / write a real one when Verifier lands — this one
-   will be stale again by then.
-4. `skills/foreman/SKILL.md` rewrite (still deferred, still not
-   blocking).
-5. Once Verifier exists, `notify.mjs`'s `describeSignal`/message format
-   will need a Verifier-side counterpart (`/approve`/`/deny`/`/flag`
-   worded for the human, per vision.md) — currently only knows Worker's
-   vocabulary.
+1. Decide approve's terminal action — vision.md leaves "what happens
+   when work is approved? merge? who merges?" open. Currently `approve`
+   just notifies Foreman and the task sits (worktree + branch persist).
+   This is a **product decision, not just code** — needs the human's call
+   on merge authority before building. Options: (a) approve = "verified",
+   human merges when ready (status quo, lowest-risk); (b) Foreman
+   auto-merges the task branch on approve; (c) Foreman flags the human
+   "approved, merge?" and the human confirms. Recommend (a) for now.
+2. `skills/foreman/SKILL.md` rewrite (still deferred, still not
+   blocking — nothing reads it yet).
+3. Refresh this file again as the above land.

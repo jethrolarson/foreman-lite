@@ -49,7 +49,10 @@ function taskEventsPath(worktreeRoot: string): string {
 function appendTaskEvent(worktreeRoot: string, action: WorkerAction, context: string): void {
 	const path = taskEventsPath(worktreeRoot);
 	mkdirSync(join(worktreeRoot, ".task"), { recursive: true });
-	appendFileSync(path, `${JSON.stringify({ action, context, timestamp: Date.now() })}\n`);
+	appendFileSync(
+		path,
+		`${JSON.stringify({ role: "worker", action, context, timestamp: Date.now() })}\n`,
+	);
 }
 
 function describeAction(action: WorkerAction, context: string): string {

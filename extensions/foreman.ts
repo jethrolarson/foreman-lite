@@ -19,8 +19,8 @@
  * run once on this machine (installs the pi<->herdr state-reporting
  * extension globally; this file doesn't do that for you).
  *
- * First-pass scope: `create_task` only. `halt_worker` and an
- * event/state watcher are follow-ups — see docs/handoff.md.
+ * Also provides `halt_worker`. An event/state watcher (Verifier spawn on
+ * `done`) is still a follow-up — see docs/handoff.md.
  */
 
 import { execFileSync } from "node:child_process";
@@ -38,14 +38,25 @@ interface TaskRecord {
 	worktreePath: string;
 	branch: string;
 	paneId: string;
-	// Which pane is running Foreman itself, i.e. process.env.HERDR_PANE_ID at
-	// the moment create_task ran. Read from Foreman's own inherited env, not
-	// configured — correct automatically since create_task only ever runs
-	// inside Foreman's own pi process. Undefined when not running under herdr
-	// (e.g. local dev without HERDR_ENV) — the task-events plugin has nothing
-	// to push to in that case and skips it.
+	// Which role this pane plays. Worker entries are written by create_task;
+	// verifier entries are written by the task-events plugin when it spawns
+	// a Verifier, so the plugin can route each pane's signals correctly.
+	role: "worker" | "verifier";
+	// The original task request, so a spawned Verifier can review against it.
+	prompt: string;
+	// Provider/model to spawn the Verifier with (Foreman's own, since the
+	// task-events plugin process doesn't inherit pi's env). Forwarded from
+	// PI_PROVIDER/PI_MODEL so Verifiers don't fall back to stale defaults.
+	provider: string | undefined;
+	model: string | undefined;
+	// Foreman's own pane, read from HERDR_PANE_ID at create_task time. The
+	// task-events plugin pushes notifications here. Undefined outside herdr.
 	foremanPaneId: string | undefined;
 	sessionPath: string | undefined;
+	// Cross-links set once the other role spawns for this task:
+	// worker entry -> its verifier pane; verifier entry -> its worker pane.
+	verifierPaneId?: string;
+	workerPaneId?: string;
 	createdAt: number;
 }
 
@@ -72,9 +83,26 @@ function taskMetaDir(repoRoot: string, id: string): string {
 	return join(repoRoot, ".foreman", "tasks", id);
 }
 
+function readTaskRecord(repoRoot: string, id: string): TaskRecord | undefined {
+	return readJsonOptional<TaskRecord>(join(taskMetaDir(repoRoot, id), "meta.json"));
+}
+
 function workerExtensionPath(): string {
 	// extensions/worker.ts, sibling of this file, regardless of cwd.
 	return join(dirname(fileURLToPath(import.meta.url)), "worker.ts");
+}
+
+// Read & parse a JSON file we own. Missing (ENOENT) = absent; anything else
+// (corrupt, permission) surfaces rather than masquerading as empty.
+function readJsonOptional<T>(path: string): T | undefined {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+	return JSON.parse(raw) as T;
 }
 
 // --- herdr, at the edge -------------------------------------------------
@@ -120,13 +148,8 @@ async function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * A pane returned by `worktree create` is occasionally not yet at an
- * available shell prompt (`agent_pane_busy`) — verified as a real,
- * transient race, not hypothetical: reproduced with zero delay,
- * resolved with a 1s sleep. Retrying beats a blind sleep since it's
- * bounded by the actual condition rather than a guessed duration.
- */
+// `worktree create`'s pane is occasionally not at a shell prompt yet
+// (`agent_pane_busy`) — a real transient race. Retry beats a blind sleep.
 async function runHerdrRetryingPaneBusy(args: string[], attempts = 5, delayMs = 500): Promise<Record<string, unknown>> {
 	for (let attempt = 1; attempt <= attempts; attempt++) {
 		try {
@@ -159,22 +182,47 @@ function createWorktree(repoRoot: string, branch: string, label: string): { pane
 	return { paneId: rootPane.pane_id, worktreePath: rootPane.cwd };
 }
 
+// Forward Foreman's provider/model so Workers don't fall back to defaults
+// that may diverge or point at a stale key (caused mid-task auth exits).
+function workerAgentArgs(name: string, paneId: string, prompt: string): string[] {
+	const piFlags: string[] = ["-e", workerExtensionPath()];
+	if (process.env.PI_PROVIDER) piFlags.push("--provider", process.env.PI_PROVIDER);
+	if (process.env.PI_MODEL) piFlags.push("--model", process.env.PI_MODEL);
+	piFlags.push(prompt);
+	return ["agent", "start", name, "--kind", "pi", "--pane", paneId, "--", ...piFlags];
+}
+
 async function startWorkerAgent(name: string, paneId: string, prompt: string): Promise<{ sessionPath: string | undefined }> {
-	const result = await runHerdrRetryingPaneBusy([
-		"agent",
-		"start",
-		name,
-		"--kind",
-		"pi",
-		"--pane",
-		paneId,
-		"--",
-		"-e",
-		workerExtensionPath(),
-		prompt,
-	]);
+	const result = await runHerdrRetryingPaneBusy(workerAgentArgs(name, paneId, prompt));
 	const agent = (result as { agent: { agent_session?: { value?: string } } }).agent;
 	return { sessionPath: agent?.agent_session?.value };
+}
+
+// `esc` interrupts the current turn; the pane/worktree stay for resuming.
+// Target is the agent name, which create_task sets to the task id.
+function haltWorkerAgent(id: string): void {
+	runHerdr(["agent", "send-keys", id, "esc"]);
+}
+
+// Foreman's flag-to-human: a native OS notification so attention is caught
+// even when the human isn't watching the terminal. Foreman is the only role
+// that talks to the human directly (vision.md), so only it gets this.
+function sendOsNotification(message: string): { ok: true } | { ok: false; reason: string } {
+	const platform = process.platform;
+	try {
+		if (platform === "darwin") {
+			const escaped = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+			execFileSync("osascript", ["-e", `display notification "${escaped}" with title "Foreman" sound name "Glass"`]);
+			return { ok: true };
+		}
+		if (platform === "linux") {
+			execFileSync("notify-send", ["Foreman", message]);
+			return { ok: true };
+		}
+		return { ok: false, reason: `no notifier for platform ${platform}` };
+	} catch (error) {
+		return { ok: false, reason: String(error) };
+	}
 }
 
 function writeTaskRecord(repoRoot: string, record: TaskRecord): void {
@@ -183,22 +231,14 @@ function writeTaskRecord(repoRoot: string, record: TaskRecord): void {
 	writeFileSync(join(dir, "meta.json"), `${JSON.stringify(record, null, 2)}\n`);
 }
 
-/**
- * Global (cross-repo), keyed by pane id — the task-events herdr plugin
- * looks tasks up by the pane_id it gets from pane.agent_status_changed,
- * and it has no notion of "which repo" a pane belongs to. meta.json above
- * stays repo-local for anything that only ever needs one repo's own tasks.
- */
+// Cross-repo, keyed by pane id: the task-events plugin gets only a pane_id
+// from pane.agent_status_changed, with no notion of repo.
 function registryPath(): string {
 	return join(homedir(), ".foreman", "registry.json");
 }
 
 function readRegistry(): Record<string, TaskRecord> {
-	try {
-		return JSON.parse(readFileSync(registryPath(), "utf8"));
-	} catch {
-		return {};
-	}
+	return readJsonOptional<Record<string, TaskRecord>>(registryPath()) ?? {};
 }
 
 function writeRegistryEntry(record: TaskRecord): void {
@@ -258,6 +298,10 @@ const createTaskTool = defineTool({
 			worktreePath,
 			branch,
 			paneId,
+			role: "worker",
+			prompt: params.prompt,
+			provider: process.env.PI_PROVIDER,
+			model: process.env.PI_MODEL,
 			foremanPaneId: process.env.HERDR_PANE_ID,
 			sessionPath,
 			createdAt: Date.now(),
@@ -277,6 +321,71 @@ const createTaskTool = defineTool({
 	},
 });
 
+const haltWorkerTool = defineTool({
+	name: "halt_worker",
+	label: "Halt Worker",
+	description:
+		"Interrupt an in-progress Worker's current turn (sends Escape to its pane). The worktree and pane are left intact — this does not end the task, just stops what the Worker is doing right now.",
+	promptSnippet: "Send Escape to a task's Worker to interrupt its current turn",
+	parameters: Type.Object({
+		id: Type.String({ description: "Task id, as returned by create_task" }),
+	}),
+
+	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		const record = readTaskRecord(ctx.cwd, params.id);
+		if (!record) {
+			return {
+				content: [{ type: "text", text: `No task found with id ${params.id} (looked in ${taskMetaDir(ctx.cwd, params.id)})` }],
+				details: undefined,
+				isError: true,
+			};
+		}
+
+		try {
+			haltWorkerAgent(record.id);
+		} catch (error) {
+			return {
+				content: [{ type: "text", text: `Failed to halt Worker for task ${params.id}: ${String(error)}` }],
+				details: undefined,
+				isError: true,
+			};
+		}
+
+		return {
+			content: [{ type: "text", text: `Sent halt (Escape) to task ${params.id}'s Worker (pane ${record.paneId}).` }],
+			details: record,
+		};
+	},
+});
+
+const flagTool = defineTool({
+	name: "flag",
+	label: "Flag to Human",
+	description:
+		"Send a native OS notification to the human when something demands their attention (a Worker/Verifier flag you couldn't resolve, or any decision only the human can make). Use sparingly — this interrupts them.",
+	promptSnippet: "Send an OS notification to the human",
+	parameters: Type.Object({
+		context: Type.String({ description: "What demands the human's attention and what you need from them" }),
+	}),
+
+	async execute(_toolCallId, params) {
+		const result = sendOsNotification(params.context);
+		const delivered = result.ok;
+		const reason = result.ok ? undefined : result.reason;
+		return {
+			content: [
+				delivered
+					? { type: "text", text: `Notified the human: ${params.context}` }
+					: { type: "text", text: `OS notification not delivered (${reason}). Flag context: ${params.context}` },
+			],
+			details: { context: params.context, delivered, reason },
+			isError: delivered ? undefined : true,
+		};
+	},
+});
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(createTaskTool);
+	pi.registerTool(haltWorkerTool);
+	pi.registerTool(flagTool);
 }
