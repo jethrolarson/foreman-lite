@@ -196,13 +196,22 @@ herdr plugin link /path/to/foreman-lite/plugins/task-events
 ```
 Foreman itself is launched as
 `pi -e /path/to/foreman-lite/extensions/foreman.ts --skill /path/to/foreman-lite/skills/foreman`
-from the target project's repo root. The skill is Foreman's role definition
-(task model, signal vocabulary, on-disk state, herdr commands, discretion
-rules) — without it the session just has three tools and no idea how to be
-Foreman. As above, that `pi` process must itself run inside a herdr pane
-(so it inherits `HERDR_PANE_ID`) — outside herdr `create_task` still works,
-but `foremanPaneId` is `undefined` and the plugin silently skips pushing
-for that task (checked explicitly in `notify.mjs`, not a crash).
+from the target project's repo root. As above, that `pi` process must itself
+run inside a herdr pane (so it inherits `HERDR_PANE_ID`) — outside herdr
+`create_task` still works, but `foremanPaneId` is `undefined` and the plugin
+silently skips pushing for that task (checked explicitly in `notify.mjs`,
+not a crash).
+
+**Role definitions are not skills.** Each role's directives live as markdown
+in `roles/{foreman,worker,verifier}.md` and are injected as an always-on
+system prompt by the matching extension via `before_agent_start` (read by
+`extensions/roles.ts`). Skills are progressive-disclosure (body loads
+on-demand via `read`, which models don't always do) — wrong for a role that
+must govern turn 1. `skills/foreman/SKILL.md` remains as Foreman's on-demand
+*reference* (task model, on-disk state, herdr commands, compaction recovery);
+the directives are injected, not duplicated there. Verified live with the
+refactor: Worker done → Verifier spawned (role injected, spawn prompt
+reduced to task context only) → approve.
 
 ## How to re-verify any of this from scratch
 

@@ -155,18 +155,12 @@ function verifierExtensionPath() {
 }
 
 function buildVerifierPrompt(task, event) {
-	// Single line + no embedded quotes: herdr shell-encodes `agent start --
-	// <argv>` for the target pane, and multi-line/quoted prompts are rejected
-	// as unsafe. Keep it shell-flat rather than fighting herdr's encoder.
+	// Role framing is injected by verifier.ts's system-prompt hook; this is
+	// just the per-task review context. Single line, quotes stripped: herdr
+	// shell-encodes `agent start -- <argv>` and rejects multi-line/quoted.
 	const request = task.prompt.replace(/\s+/g, " ").replace(/["'`]/g, "");
 	const context = event.context.replace(/\s+/g, " ").replace(/["'`]/g, "");
-	return [
-		`You are the Verifier for task ${task.id}.`,
-		`Original request: ${request}.`,
-		`Worker signal: ${event.action} - ${context}.`,
-		`Review the work in this repo against the request: read the changes, run tests, re-check the spec. Do not implement fixes yourself - a deny sends it back to the Worker.`,
-		`Then call verifier_signal: approve (work is correct), deny (with what to fix), or flag (raise a concern to Foreman).`,
-	].join(" ");
+	return `Task ${task.id}. Original request: ${request}. Worker signal: ${event.action} - ${context}. Review the work against the request and verifier_signal.`;
 }
 
 // Spawn a Verifier pane in the Worker's own worktree (so it sees the real

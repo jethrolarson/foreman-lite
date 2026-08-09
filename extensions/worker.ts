@@ -20,11 +20,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { readRole } from "./roles.js";
 
 type WorkerAction = "planned" | "done" | "flag";
 
 const SIGNAL_TOOL_NAME = "worker_signal";
 const MAX_NAGS_PER_RUN = 3;
+
+// Injected as always-on system prompt (roles/worker.md) so the role governs
+// turn 1 — not a skill, to avoid the progressive-disclosure read gate.
+const WORKER_ROLE_PROMPT = readRole("worker");
 
 /**
  * Did this run's messages include a call to the lifecycle-signal tool?
@@ -100,6 +105,10 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(buildWorkerSignalTool(pi));
+
+	pi.on("before_agent_start", (event) => ({
+		systemPrompt: `${event.systemPrompt}\n\n${WORKER_ROLE_PROMPT}`,
+	}));
 
 	// Turn-end enforcement: pi has no direct "stop hook" that can veto
 	// ending the run, so this uses the standard pi pattern instead (same

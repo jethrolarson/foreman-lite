@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { readRole } from "./roles.js";
 
 interface TaskRecord {
 	id: string;
@@ -384,8 +385,18 @@ const flagTool = defineTool({
 	},
 });
 
+// Core role directives, always-on via system-prompt injection (roles/foreman.md)
+// — not a skill, to avoid the progressive-disclosure read gate. The full
+// reference (task model, on-disk state, herdr commands, compaction recovery)
+// lives in skills/foreman/SKILL.md, loaded on demand.
+const FOREMAN_ROLE_PROMPT = readRole("foreman");
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(createTaskTool);
 	pi.registerTool(haltWorkerTool);
 	pi.registerTool(flagTool);
+
+	pi.on("before_agent_start", (event) => ({
+		systemPrompt: `${event.systemPrompt}\n\n${FOREMAN_ROLE_PROMPT}`,
+	}));
 }

@@ -19,11 +19,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { readRole } from "./roles.js";
 
 type VerifierAction = "approve" | "deny" | "flag";
 
 const SIGNAL_TOOL_NAME = "verifier_signal";
 const MAX_NAGS_PER_RUN = 3;
+
+// Injected as always-on system prompt (roles/verifier.md) so the role governs
+// turn 1 — not a skill, to avoid the progressive-disclosure read gate.
+const VERIFIER_ROLE_PROMPT = readRole("verifier");
 
 function calledVerifierSignal(messages: AgentMessage[]): boolean {
 	return messages.some(
@@ -91,6 +96,10 @@ function buildVerifierSignalTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(buildVerifierSignalTool(pi));
+
+	pi.on("before_agent_start", (event) => ({
+		systemPrompt: `${event.systemPrompt}\n\n${VERIFIER_ROLE_PROMPT}`,
+	}));
 
 	// Same turn-end enforcement as worker.ts: a Verifier that goes idle
 	// without a verdict is a stuck review, so nag (bounded) rather than
