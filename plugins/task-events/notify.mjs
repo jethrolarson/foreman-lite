@@ -36,12 +36,22 @@ function registryPath() {
 	return join(homedir(), ".foreman", "registry.json");
 }
 
-function readRegistry() {
+// Read & parse a JSON file we own. Missing (ENOENT) = absent; anything else
+// (corrupt, permission) throws rather than masquerading as empty — a corrupt
+// registry must surface, not silently look like no tasks.
+function readJsonOptional(path) {
+	let raw;
 	try {
-		return JSON.parse(readFileSync(registryPath(), "utf8"));
-	} catch {
-		return {};
+		raw = readFileSync(path, "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
 	}
+	return JSON.parse(raw);
+}
+
+function readRegistry() {
+	return readJsonOptional(registryPath()) ?? {};
 }
 
 function writeRegistry(registry) {
@@ -57,14 +67,15 @@ function upsertEntry(record) {
 }
 
 function lastTaskEvent(worktreePath) {
+	let raw;
 	try {
-		const raw = readFileSync(join(worktreePath, ".task", "events.jsonl"), "utf8");
-		const lines = raw.trim().split("\n").filter(Boolean);
-		const last = lines.at(-1);
-		return last ? JSON.parse(last) : undefined;
-	} catch {
-		return undefined;
+		raw = readFileSync(join(worktreePath, ".task", "events.jsonl"), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
 	}
+	const last = raw.trim().split("\n").filter(Boolean).at(-1);
+	return last ? JSON.parse(last) : undefined;
 }
 
 // Dedupe against re-pushing the same underlying signal if agent_status
@@ -76,6 +87,10 @@ function dedupeKey(task, event) {
 	return `${task.id}:${event?.role ?? "unknown"}:${ts}`;
 }
 
+// seen.json dedupe state. Unlike the registry, a corrupt/missing seen file
+// defaulting to "not pushed" is safe: the worst case is a duplicate push,
+// and pushes are idempotent for the human. So bare-catch defaults are fine
+// here — not the masquerading-as-empty smell that registry reads carry.
 function alreadyPushed(key) {
 	const stateDir = process.env.HERDR_PLUGIN_STATE_DIR;
 	if (!stateDir) return false;
