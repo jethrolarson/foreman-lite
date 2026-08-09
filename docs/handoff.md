@@ -180,8 +180,8 @@ forever.
 **Dedupe**: `notify.mjs` also guards against pushing the same underlying
 signal twice if `agent_status` flickers more than once for one logical
 change (a named risk, not speculative — the worker.ts nag loop plausibly
-causes exactly this). State kept in
-`$HERDR_PLUGIN_STATE_DIR/seen.json`, keyed by task id.
+causes exactly this). State kept in `$HERDR_PLUGIN_STATE_DIR/seen.json`,
+keyed by task id + role + event timestamp.
 
 ## Prerequisites on any machine running this (not automated, do these once)
 
@@ -194,13 +194,15 @@ herdr integration install pi     # installs ~/.pi/agent/extensions/herdr-agent-s
                                   # machine, not just foreman-lite's.
 herdr plugin link /path/to/foreman-lite/plugins/task-events
 ```
-Foreman itself is launched as `pi -e /path/to/foreman-lite/extensions/foreman.ts`
-from the target project's repo root, and only works as described above if
-that `pi` process is itself running inside a herdr pane (so it inherits
-`HERDR_PANE_ID`) — if you just run it in a plain terminal outside herdr,
-`create_task` still works, but `foremanPaneId` will be `undefined` and
-the plugin will silently skip pushing anything for that task (checked
-explicitly in `notify.mjs`, not a crash).
+Foreman itself is launched as
+`pi -e /path/to/foreman-lite/extensions/foreman.ts --skill /path/to/foreman-lite/skills/foreman`
+from the target project's repo root. The skill is Foreman's role definition
+(task model, signal vocabulary, on-disk state, herdr commands, discretion
+rules) — without it the session just has three tools and no idea how to be
+Foreman. As above, that `pi` process must itself run inside a herdr pane
+(so it inherits `HERDR_PANE_ID`) — outside herdr `create_task` still works,
+but `foremanPaneId` is `undefined` and the plugin silently skips pushing
+for that task (checked explicitly in `notify.mjs`, not a crash).
 
 ## How to re-verify any of this from scratch
 
@@ -275,12 +277,19 @@ fine to delete between test runs.
 
 1. Decide approve's terminal action — vision.md leaves "what happens
    when work is approved? merge? who merges?" open. Currently `approve`
-   just notifies Foreman and the task sits (worktree + branch persist).
-   This is a **product decision, not just code** — needs the human's call
-   on merge authority before building. Options: (a) approve = "verified",
-   human merges when ready (status quo, lowest-risk); (b) Foreman
-   auto-merges the task branch on approve; (c) Foreman flags the human
-   "approved, merge?" and the human confirms. Recommend (a) for now.
-2. `skills/foreman/SKILL.md` rewrite (still deferred, still not
-   blocking — nothing reads it yet).
-3. Refresh this file again as the above land.
+   just notifies Foreman and the task sits (worktree + branch persist);
+   the SKILL.md tells Foreman to `flag` the human that work is approved
+   and ready to merge (merge authority stays with the human). That's the
+   recommended (a) default; revisit if you want Foreman to merge.
+2. Refresh this file again as anything above changes.
+
+## Functional completeness
+
+Minus the approve-merge decision above, the build is functionally
+complete per vision.md: all three roles' commands exist and are
+live-verified, the task-events plugin auto-routes every signal, and
+`skills/foreman/SKILL.md` now carries Foreman's role definition + the
+on-disk state layout (so compaction only loses conversation, not task
+awareness — Foreman re-reads `registry.json`/`events.jsonl` to recover).
+Role separation ("MUST not implement") and "run tests before done" are
+prompt-level, not technologically binding, per the human's call.
