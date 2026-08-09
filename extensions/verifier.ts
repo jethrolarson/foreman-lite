@@ -13,13 +13,14 @@
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { readRole } from "./roles.js";
+import { taskIdFromCwd, taskEventsPath } from "./taskState.js";
 
 type VerifierAction = "approve" | "deny" | "flag";
 
@@ -40,17 +41,13 @@ function calledVerifierSignal(messages: AgentMessage[]): boolean {
   );
 }
 
-function taskEventsPath(worktreeRoot: string): string {
-  return join(worktreeRoot, ".task", "events.jsonl");
-}
-
 function appendTaskEvent(
   worktreeRoot: string,
   action: VerifierAction,
   context: string,
 ): void {
-  const path = taskEventsPath(worktreeRoot);
-  mkdirSync(join(worktreeRoot, ".task"), { recursive: true });
+  const path = taskEventsPath(taskIdFromCwd(worktreeRoot));
+  mkdirSync(dirname(path), { recursive: true });
   appendFileSync(
     path,
     `${JSON.stringify({ role: "verifier", action, context, timestamp: Date.now() })}\n`,

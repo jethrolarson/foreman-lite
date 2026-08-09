@@ -32,6 +32,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readRole } from "./roles.js";
+import { taskMetaPath, taskStateDir } from "./taskState.js";
 
 // Task records are role-discriminated so illegal states (e.g. a worker
 // entry carrying workerPaneId) are unrepresentable. Both variants share the
@@ -88,19 +89,10 @@ function branchFor(id: string): string {
   return `task/${id}`;
 }
 
-function taskMetaDir(repoRoot: string, id: string): string {
-  return join(repoRoot, ".foreman", "tasks", id);
-}
-
 // meta.json is only ever written by create_task for a worker record, so
 // this is narrowly typed rather than the full TaskRecord union.
-function readTaskRecord(
-  repoRoot: string,
-  id: string,
-): WorkerRecord | undefined {
-  return readJsonOptional<WorkerRecord>(
-    join(taskMetaDir(repoRoot, id), "meta.json"),
-  );
+function readTaskRecord(id: string): WorkerRecord | undefined {
+  return readJsonOptional<WorkerRecord>(taskMetaPath(id));
 }
 
 function workerExtensionPath(): string {
@@ -322,10 +314,13 @@ function sendOsNotification(
   }
 }
 
-function writeTaskRecord(repoRoot: string, record: TaskRecord): void {
-  const dir = taskMetaDir(repoRoot, record.id);
+function writeTaskRecord(record: TaskRecord): void {
+  const dir = taskStateDir(record.id);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "meta.json"), `${JSON.stringify(record, null, 2)}\n`);
+  writeFileSync(
+    taskMetaPath(record.id),
+    `${JSON.stringify(record, null, 2)}\n`,
+  );
 }
 
 // Cross-repo, keyed by pane id: the task-events plugin gets only a pane_id
@@ -402,7 +397,7 @@ const createTaskTool = defineTool({
       sessionPath: undefined,
       createdAt: Date.now(),
     };
-    writeTaskRecord(repoRoot, record);
+    writeTaskRecord(record);
     writeRegistryEntry(record);
 
     const started = await startWorkerAgent(
@@ -425,7 +420,7 @@ const createTaskTool = defineTool({
     }
     if (started.value.sessionPath) {
       record.sessionPath = started.value.sessionPath;
-      writeTaskRecord(repoRoot, record);
+      writeTaskRecord(record);
       writeRegistryEntry(record);
     }
 
@@ -452,13 +447,13 @@ const haltWorkerTool = defineTool({
   }),
 
   async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-    const record = readTaskRecord(ctx.cwd, params.id);
+    const record = readTaskRecord(params.id);
     if (!record) {
       return {
         content: [
           {
             type: "text",
-            text: `No task found with id ${params.id} (looked in ${taskMetaDir(ctx.cwd, params.id)})`,
+            text: `No task found with id ${params.id} (looked in ${taskStateDir(params.id)})`,
           },
         ],
         details: undefined,

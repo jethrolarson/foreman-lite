@@ -66,10 +66,15 @@ function upsertEntry(record) {
   writeRegistry(registry);
 }
 
-function lastTaskEvent(worktreePath) {
+// Per-task state lives under ~/.foreman/tasks/<id>/ (not in the repo), so
+// the plugin reads events.jsonl by task id, not worktree path.
+function lastTaskEvent(taskId) {
   let raw;
   try {
-    raw = readFileSync(join(worktreePath, ".task", "events.jsonl"), "utf8");
+    raw = readFileSync(
+      join(homedir(), ".foreman", "tasks", taskId, "events.jsonl"),
+      "utf8",
+    );
   } catch (error) {
     if (error.code === "ENOENT") return undefined;
     throw error;
@@ -365,7 +370,7 @@ if (!task) {
   process.exit(0);
 }
 
-const lastEvent = lastTaskEvent(task.worktreePath);
+const lastEvent = lastTaskEvent(task.id);
 
 // A Worker going idle with no signal is ambiguous: the nag hook may be
 // re-triggering a turn, so the pane flickers idle between agent_end and the
