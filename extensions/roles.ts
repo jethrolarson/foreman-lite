@@ -8,6 +8,6 @@ import { fileURLToPath } from "node:url";
 // (not as a skill), so the role governs turn 1 without a progressive-disclosure
 // read gate. See docs/handoff.md for the mechanism decision.
 export function readRole(name: string): string {
-	const here = dirname(fileURLToPath(import.meta.url));
-	return readFileSync(join(here, "..", "roles", `${name}.md`), "utf8");
+  const here = dirname(fileURLToPath(import.meta.url));
+  return readFileSync(join(here, "..", "roles", `${name}.md`), "utf8");
 }

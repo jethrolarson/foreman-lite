@@ -135,18 +135,18 @@ const fail = (error: HerdrError): Result<never> => ({ ok: false, error });
 const err = (message: string, code?: string): Result<never> =>
   fail({ message, code });
 
-function tryParseHerdrError(
-  stdout: string,
-): { message: string; code: string } | undefined {
+// Extract a HerdrError from herdr's stderr. Herdr normally writes a JSON
+// error body; if stderr isn't JSON (or lacks .error), fall back to the raw
+// stderr string with unknown code rather than discarding it — the raw text
+// is more informative than Node's generic "Command failed" string.
+function herdrErrorFromStderr(stderr: string): HerdrError {
   try {
-    const parsed = JSON.parse(stdout);
-    return parsed?.error
-      ? { message: parsed.error.message, code: parsed.error.code }
-      : undefined;
+    const parsed = JSON.parse(stderr);
+    if (parsed?.error) return { message: parsed.error.message, code: parsed.error.code };
   } catch {
-    // stderr isn't guaranteed JSON — best-effort parse, not a masked failure.
-    return undefined;
+    // not JSON — use the raw stderr below
   }
+  return { message: stderr.trim(), code: undefined };
 }
 
 function runHerdr(args: string[]): Result<Record<string, unknown>> {
@@ -155,13 +155,12 @@ function runHerdr(args: string[]): Result<Record<string, unknown>> {
     stdout = execFileSync("herdr", args, { encoding: "utf8" });
   } catch (error) {
     // herdr prints its JSON error body to stderr on nonzero exit (not stdout).
-    const maybeStderr = (
-      error as { stderr?: Buffer | string }
-    )?.stderr?.toString();
-    const parsed = maybeStderr ? tryParseHerdrError(maybeStderr) : undefined;
-    return parsed
-      ? err(`herdr ${args.join(" ")} failed: ${parsed.message}`, parsed.code)
-      : err(`herdr ${args.join(" ")} failed: ${String(error)}`);
+    const maybeStderr = (error as { stderr?: Buffer | string })?.stderr?.toString();
+    if (maybeStderr) {
+      const e = herdrErrorFromStderr(maybeStderr);
+      return err(`herdr ${args.join(" ")} failed: ${e.message}`, e.code);
+    }
+    return err(`herdr ${args.join(" ")} failed: ${String(error)}`);
   }
   let parsed: unknown;
   try {
