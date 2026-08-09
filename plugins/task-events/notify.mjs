@@ -163,9 +163,9 @@ function parseHerdrError(stderr) {
   }
 }
 
-function promptPane(paneId, text) {
+async function promptPane(paneId, text) {
   try {
-    runHerdr(["agent", "prompt", paneId, text]);
+    await runHerdr(["agent", "prompt", paneId, text]);
   } catch (error) {
     console.error(`promptPane ${paneId} failed: ${error.message}`);
   }
@@ -213,37 +213,44 @@ function writeVerifierPromptFile(task, event) {
   return path;
 }
 
-// Spawn a Verifier pane in the Worker's own worktree (so it sees the real
-// changes), seed it, and register it so its own signals route back. Returns
-// the verifier pane id, or undefined on failure.
+// Spawn a Verifier as a split of the Worker's pane (same workspace, so it
+// nests under the Worker/Foreman in herdr's tree) in the Worker's own
+// worktree (so it sees the real changes). Seed it, register it so its own
+// signals route back. Returns the verifier pane id, or undefined on failure.
 async function spawnVerifier(task, event) {
   // Verifier agent name is a short unique handle (herdr caps names at 32
   // chars, and `${task.id}-verifier` overflows). The registry links the
   // verifier pane back to the task via workerPaneId, so the name needn't
-  // encode the task id — `herdr agent list` shows the worktree cwd for that.
+  // encode the task id.
   const verifierId = `vf-${Date.now().toString(36)}`;
   let paneId;
   try {
     const result = await runHerdr([
-      "workspace",
-      "create",
+      "pane",
+      "split",
+      task.paneId,
+      "--direction",
+      "down",
       "--cwd",
       task.worktreePath,
-      "--label",
-      verifierId,
       "--no-focus",
     ]);
-    paneId = result.root_pane.pane_id;
+    paneId = result.pane.pane_id;
   } catch (error) {
-    console.error(`spawnVerifier workspace create failed: ${error.message}`);
-    promptPane(
+    console.error(`spawnVerifier pane split failed: ${error.message}`);
+    await promptPane(
       task.foremanPaneId,
       `Task ${task.id}: failed to spawn Verifier (${error.message}). Review manually.`,
     );
     return undefined;
   }
 
-  const piFlags = ["-e", verifierExtensionPath()];
+  const piFlags = [
+    "-e",
+    verifierExtensionPath(),
+    "--name",
+    `Verifier: ${task.name}`,
+  ];
   if (task.provider) piFlags.push("--provider", task.provider);
   if (task.model) piFlags.push("--model", task.model);
   piFlags.push(`@${writeVerifierPromptFile(task, event)}`);
@@ -271,7 +278,7 @@ async function spawnVerifier(task, event) {
     // either way the pane exists and the plugin will push the Verifier's signals.
     if (error.code !== "timeout") {
       console.error(`spawnVerifier agent start failed: ${error.message}`);
-      promptPane(
+      await promptPane(
         task.foremanPaneId,
         `Task ${task.id}: Verifier pane created (${paneId}) but agent failed to start (${error.message}).`,
       );
@@ -388,11 +395,11 @@ if (!task.foremanPaneId) {
 
 if (task.role === "worker") {
   const describe = `Task ${task.id} (${status}): ${describeWorkerSignal(lastEvent)}`;
-  if (task.foremanPaneId) promptPane(task.foremanPaneId, describe);
+  if (task.foremanPaneId) await promptPane(task.foremanPaneId, describe);
 
   if (lastEvent && VERIFIER_ACTIONS.has(lastEvent.action)) {
     if (task.verifierPaneId) {
-      promptPane(
+      await promptPane(
         task.verifierPaneId,
         `Worker ${lastEvent.action}: ${lastEvent.context}. Review again and verifier_signal.`,
       );
@@ -405,10 +412,10 @@ if (task.role === "worker") {
 
 if (task.role === "verifier") {
   const describe = `Task ${task.id} verifier (${status}): ${describeVerifierSignal(lastEvent)}`;
-  if (task.foremanPaneId) promptPane(task.foremanPaneId, describe);
+  if (task.foremanPaneId) await promptPane(task.foremanPaneId, describe);
 
   if (lastEvent?.action === "deny" && task.workerPaneId) {
-    promptPane(
+    await promptPane(
       task.workerPaneId,
       `Verifier denied: ${lastEvent.context}. Address this and worker_signal done when ready.`,
     );

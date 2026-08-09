@@ -38,6 +38,9 @@ import { readRole } from "./roles.js";
 // base; the registry is one JSON map keyed by pane id holding either.
 interface TaskRecordBase {
   id: string;
+  // Human-readable task name (params.name) — used for pi session --name so
+  // sessions aren't cryptic, and so the Verifier spawn can name itself.
+  name: string;
   repoRoot: string;
   worktreePath: string;
   branch: string;
@@ -227,10 +230,16 @@ function createWorktree(
 // (a real failure in dogfooding). @file is lossless and encodes as a safe path.
 function workerAgentArgs(
   name: string,
+  displayName: string,
   paneId: string,
   promptFile: string,
 ): string[] {
-  const piFlags: string[] = ["-e", workerExtensionPath()];
+  const piFlags: string[] = [
+    "-e",
+    workerExtensionPath(),
+    "--name",
+    `Worker: ${displayName}`,
+  ];
   if (process.env.PI_PROVIDER)
     piFlags.push("--provider", process.env.PI_PROVIDER);
   if (process.env.PI_MODEL) piFlags.push("--model", process.env.PI_MODEL);
@@ -259,12 +268,13 @@ function writePromptFile(id: string, prompt: string): string {
 
 async function startWorkerAgent(
   name: string,
+  displayName: string,
   paneId: string,
   prompt: string,
 ): Promise<Result<{ sessionPath: string | undefined }>> {
   const promptFile = writePromptFile(name, prompt);
   const r = await runHerdrRetryingPaneBusy(
-    workerAgentArgs(name, paneId, promptFile),
+    workerAgentArgs(name, displayName, paneId, promptFile),
   );
   if (r.ok) {
     const agent = (r.value as { agent: { agent_session?: { value?: string } } })
@@ -379,6 +389,7 @@ const createTaskTool = defineTool({
     // create_task needn't confirm startup — and never orphans the worktree.
     const record: WorkerRecord = {
       id,
+      name: params.name,
       repoRoot,
       worktreePath,
       branch,
@@ -394,7 +405,12 @@ const createTaskTool = defineTool({
     writeTaskRecord(repoRoot, record);
     writeRegistryEntry(record);
 
-    const started = await startWorkerAgent(id, paneId, params.prompt);
+    const started = await startWorkerAgent(
+      id,
+      params.name,
+      paneId,
+      params.prompt,
+    );
     if (!started.ok) {
       return {
         content: [
