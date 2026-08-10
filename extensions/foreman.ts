@@ -81,8 +81,8 @@ function slugify(name: string): string {
 }
 
 function taskId(name: string, suffix: string): string {
-  // herdr agent names are capped at 32 chars; slug is truncated to leave room
-  // for the `-<suffix>` (suffix is Date.now().toString(36), 8 chars + hyphen).
+  // Keep the historical 32-char id bound for compact branch, label, registry,
+  // and session displays; leave room for the 8-char timestamp suffix.
   const slug = slugify(name).slice(0, 23);
   return slug ? `${slug}-${suffix}` : suffix;
 }
@@ -153,15 +153,7 @@ function runHerdr(args: string[]): Result<Record<string, unknown>> {
   try {
     stdout = execFileSync("herdr", args, { encoding: "utf8" });
   } catch (error) {
-    // herdr prints its JSON error body to stderr on nonzero exit (not stdout).
-    const maybeStderr = (
-      error as { stderr?: Buffer | string }
-    )?.stderr?.toString();
-    if (maybeStderr) {
-      const e = herdrErrorFromStderr(maybeStderr);
-      return err(`herdr ${args.join(" ")} failed: ${e.message}`, e.code);
-    }
-    return err(`herdr ${args.join(" ")} failed: ${String(error)}`);
+    return fail(herdrExecError(args, error));
   }
   let parsed: unknown;
   try {
@@ -175,19 +167,45 @@ function runHerdr(args: string[]): Result<Record<string, unknown>> {
   return ok((parsed as { result: Record<string, unknown> }).result);
 }
 
+function herdrExecError(args: string[], error: unknown): HerdrError {
+  const maybeStderr = (
+    error as { stderr?: Buffer | string }
+  )?.stderr?.toString();
+  if (maybeStderr) {
+    const parsed = herdrErrorFromStderr(maybeStderr);
+    return {
+      message: `herdr ${args.join(" ")} failed: ${parsed.message}`,
+      code: parsed.code,
+    };
+  }
+  return { message: `herdr ${args.join(" ")} failed: ${String(error)}` };
+}
+
+// `pane run` succeeds without a JSON result body: it atomically submits the
+// command to the target shell and returns. The pi integration/plugin then
+// reports real lifecycle state, so no startup-readiness wait is needed.
+function runHerdrNoOutput(args: string[]): Result<void> {
+  try {
+    execFileSync("herdr", args, { encoding: "utf8" });
+    return ok(undefined);
+  } catch (error) {
+    return fail(herdrExecError(args, error));
+  }
+}
+
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // `worktree create`'s pane is occasionally not at a shell prompt yet
 // (`agent_pane_busy`) — a real transient race. Retry beats a blind sleep.
-async function runHerdrRetryingPaneBusy(
+async function runHerdrNoOutputRetryingPaneBusy(
   args: string[],
   attempts = 5,
   delayMs = 500,
-): Promise<Result<Record<string, unknown>>> {
+): Promise<Result<void>> {
   for (let attempt = 1; ; attempt++) {
-    const result = runHerdr(args);
+    const result = runHerdrNoOutput(args);
     if (result.ok) return result;
     if (result.error.code !== "agent_pane_busy" || attempt >= attempts)
       return result;
@@ -219,38 +237,29 @@ function createWorktree(
 
 // Forward Foreman's provider/model so Workers don't fall back to defaults
 // that may diverge or point at a stale key (caused mid-task auth exits).
-// The prompt goes via @file, not a shell arg — herdr shell-encodes `agent
-// start -- <argv>` for the target pane and rejects multi-line/quoted prompts
-// (a real failure in dogfooding). @file is lossless and encodes as a safe path.
-function workerAgentArgs(
-  name: string,
+// `pane run` accepts one shell command, so quote every argv value. Keep the
+// prompt in @file: it is lossless and avoids embedding arbitrary multiline
+// task text in that command.
+const shellQuote = (value: string): string =>
+  `'${value.replaceAll("'", `'"'"'`)}'`;
+
+function workerLaunchArgs(
   displayName: string,
   paneId: string,
   promptFile: string,
 ): string[] {
-  const piFlags: string[] = [
+  const piArgs: string[] = [
+    "pi",
     "-e",
     workerExtensionPath(),
     "--name",
     `Worker: ${displayName}`,
   ];
   if (process.env.PI_PROVIDER)
-    piFlags.push("--provider", process.env.PI_PROVIDER);
-  if (process.env.PI_MODEL) piFlags.push("--model", process.env.PI_MODEL);
-  piFlags.push(`@${promptFile}`);
-  return [
-    "agent",
-    "start",
-    name,
-    "--kind",
-    "pi",
-    "--pane",
-    paneId,
-    "--timeout",
-    "4000",
-    "--",
-    ...piFlags,
-  ];
+    piArgs.push("--provider", process.env.PI_PROVIDER);
+  if (process.env.PI_MODEL) piArgs.push("--model", process.env.PI_MODEL);
+  piArgs.push(`@${promptFile}`);
+  return ["pane", "run", paneId, piArgs.map(shellQuote).join(" ")];
 }
 
 function writePromptFile(id: string, prompt: string): string {
@@ -267,26 +276,16 @@ async function startWorkerAgent(
   prompt: string,
 ): Promise<Result<{ sessionPath: string | undefined }>> {
   const promptFile = writePromptFile(name, prompt);
-  const r = await runHerdrRetryingPaneBusy(
-    workerAgentArgs(name, displayName, paneId, promptFile),
+  const launched = await runHerdrNoOutputRetryingPaneBusy(
+    workerLaunchArgs(displayName, paneId, promptFile),
   );
-  if (r.ok) {
-    const agent = (r.value as { agent: { agent_session?: { value?: string } } })
-      .agent;
-    return ok({ sessionPath: agent?.agent_session?.value });
-  }
-  // herdr's pi-readiness wait is unreliable (times out even when pi launches
-  // fine). Don't block on it or poll — the task is registered, and the
-  // task-events plugin pushes the Worker's real state transitions to Foreman.
-  // Only a non-timeout error is a real failure.
-  if (r.error.code === "timeout") return ok({ sessionPath: undefined });
-  return fail(r.error);
+  return launched.ok ? ok({ sessionPath: undefined }) : fail(launched.error);
 }
 
 // `esc` interrupts the current turn; the pane/worktree stay for resuming.
-// Target is the agent name, which create_task sets to the task id.
-function haltWorkerAgent(id: string): Result<void> {
-  const r = runHerdr(["agent", "send-keys", id, "esc"]);
+// Pane id is durable in task state, unlike herdr's transient agent name.
+function haltWorkerAgent(paneId: string): Result<void> {
+  const r = runHerdr(["agent", "send-keys", paneId, "esc"]);
   return r.ok ? ok(undefined) : fail(r.error);
 }
 
@@ -380,10 +379,8 @@ const createTaskTool = defineTool({
     }
     const { paneId, worktreePath } = wt.value;
 
-    // Register BEFORE starting the agent so the task is tracked even if agent
-    // start reports a timeout (herdr's pi-readiness wait is unreliable). The
-    // task-events plugin pushes the Worker's real transitions to Foreman, so
-    // create_task needn't confirm startup — and never orphans the worktree.
+    // Register before submitting the launch so early integration events map to
+    // the task and a launch failure still leaves an explicit tracked record.
     const record: WorkerRecord = {
       id,
       name: params.name,
@@ -463,7 +460,7 @@ const haltWorkerTool = defineTool({
       };
     }
 
-    const halted = haltWorkerAgent(record.id);
+    const halted = haltWorkerAgent(record.paneId);
     if (!halted.ok) {
       return {
         content: [

@@ -26,23 +26,24 @@ better than what was originally planned (Foreman polling).
 
 ### `extensions/foreman.ts` — Foreman's capability
 
-- `create_task` tool: `herdr worktree create` + `herdr agent start --kind
-pi -- -e <worker.ts path> <prompt>`. No tmux, no shell strings anywhere
-  (herdr's `--` argv is a real array).
+- `create_task` tool: `herdr worktree create` + `herdr pane run <pane>
+<quoted-pi-command>`. `pane run` submits immediately; the pi integration and
+  push plugin report actual lifecycle state. Every pi argv value is POSIX-shell
+  quoted and task text stays in an `@prompt-file`, so arbitrary prompt content
+  is not embedded in the shell command.
 - Writes `~/.foreman/tasks/<id>/meta.json` and
   `~/.foreman/registry.json` (global, cross-repo, keyed by pane id) — no
   task metadata is written into the user's repo. The registry maps panes
   back to tasks; `create_task` also stamps `foremanPaneId` into both,
   read from its own `process.env.HERDR_PANE_ID` at creation time.
-- Real, live-reproduced bug fixed: `agent start` immediately after
-  `worktree create` intermittently fails `agent_pane_busy` (pane not at
-  an available shell prompt yet). Fixed with a bounded retry
-  (`runHerdrRetryingPaneBusy`, 5×/500ms) keyed to that specific error
-  code — herdr writes its JSON error to **stderr**, not stdout, which
-  broke the first version of this fix silently (retry never fired,
-  looked like it worked because the error handling still returned
-  cleanly). Both bugs found by actually running it repeatedly, not by
-  reasoning about it.
+- Real, live-reproduced launch bugs fixed: launching immediately after
+  worktree creation can hit `agent_pane_busy`, handled with a bounded
+  5×/500ms retry. More importantly, `herdr agent start` waited for unreliable
+  pi readiness and eventually wrote `timed out waiting for agent startup`
+  into the calling Foreman's terminal/input even though pi had launched and
+  the extension tolerated captured stderr. Worker and Verifier launches now
+  use non-waiting `pane run`; a smoke task returned in 865ms and herdr detected
+  the resulting pi session normally. No readiness timeout exists to inject.
 - `flag` tool: Foreman's flag-to-human — sends a native OS
   notification (`osascript display notification` on macOS,
   `notify-send` on Linux; graceful no-op elsewhere). Foreman is the only
@@ -50,11 +51,11 @@ pi -- -e <worker.ts path> <prompt>`. No tmux, no shell strings anywhere
   live** (LLM called the tool, `osascript` exited 0, notification posted).
   Foreman decides when to invoke it — e.g. a Worker/Verifier `flag` it
   can't resolve itself, or any decision only the human can make.
-- `halt_worker` tool: `herdr agent send-keys <id> esc`. Target is the
-  agent name, which `create_task` sets equal to the task id, so no
-  pane-id lookup is needed — reads `meta.json` only to give a clean
-  "no such task" error rather than letting herdr's own `agent_not_found`
-  leak through. **Verified live, cleanly, and the semantics are the good
+- `halt_worker` tool: `herdr agent send-keys <paneId> esc`. The pane id
+  comes from durable task metadata rather than herdr's transient agent-name
+  registration. It reads `meta.json` first to give a clean "no such task"
+  error rather than leaking herdr's `agent_not_found`. **Verified live,
+  cleanly, and the semantics are the good
   ones:** `esc` interrupts the Worker's current turn (the running tool
   call aborts with "Command aborted" / "This operation was aborted")
   but the pi process stays alive and is resumable — confirmed by sending
@@ -75,9 +76,9 @@ pi -- -e <worker.ts path> <prompt>`. No tmux, no shell strings anywhere
   process exits). The clean esc test used an explicit
   `--provider zai --model glm-5.2` Worker, which stayed stable through
   esc and a follow-up prompt. **Fixed:** `create_task` now forwards
-  `PI_PROVIDER`/`PI_MODEL` from Foreman's env into the `agent start --`
-  argv, and stashes them in the registry so the task-events plugin can
-  spawn Verifiers with the same provider/model (the plugin process
+  `PI_PROVIDER`/`PI_MODEL` from Foreman's env into the launched pi command,
+  and stashes them in the registry so the task-events plugin can spawn
+  Verifiers with the same provider/model (the plugin process
   doesn't inherit pi's env). Verified: a `create_task`-spawned Worker
   ran a 30s task to completion and accepted a follow-up prompt, no
   auth-exit.)

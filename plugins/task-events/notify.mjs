@@ -146,13 +146,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// herdr agent start right after workspace create intermittently hits
-// agent_pane_busy (pane not at a shell prompt yet) - same real race as
-// foreman.ts's create_task. Bounded retry on that specific code.
-async function runHerdr(args, { retryPaneBusy = false } = {}) {
+// Launching immediately after pane creation can hit agent_pane_busy (the shell
+// is not ready yet). Bounded retry only that observed transient failure.
+async function runHerdr(
+  args,
+  { retryPaneBusy = false, expectJson = true } = {},
+) {
   for (let attempt = 1; attempt <= 5; attempt++) {
     const result = spawnSync(HERDR_BIN, args, { encoding: "utf8" });
     if (result.status === 0) {
+      if (!expectJson) return undefined;
       try {
         return JSON.parse(result.stdout).result;
       } catch {
@@ -215,6 +218,8 @@ function verifierExtensionPath() {
   return join(here, "..", "..", "extensions", "verifier.ts");
 }
 
+const shellQuote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
+
 function buildVerifierPrompt(task, event) {
   // Role framing is injected by verifier.ts's system-prompt hook; this is
   // just the per-task review context. Passed via @file (see spawnVerifier) so
@@ -244,11 +249,6 @@ function writeVerifierPromptFile(task, event) {
 // worktree (so it sees the real changes). Seed it, register it so its own
 // signals route back. Returns the verifier pane id, or undefined on failure.
 async function spawnVerifier(task, event) {
-  // Verifier agent name is a short unique handle (herdr caps names at 32
-  // chars, and `${task.id}-verifier` overflows). The registry links the
-  // verifier pane back to the task via workerPaneId, so the name needn't
-  // encode the task id.
-  const verifierId = `vf-${Date.now().toString(36)}`;
   let paneId;
   try {
     const result = await runHerdr([
@@ -286,38 +286,22 @@ async function spawnVerifier(task, event) {
   piFlags.push(`@${writeVerifierPromptFile(task, event)}`);
 
   try {
-    await runHerdr(
-      [
-        "agent",
-        "start",
-        verifierId,
-        "--kind",
-        "pi",
-        "--pane",
-        paneId,
-        "--timeout",
-        "4000",
-        "--",
-        ...piFlags,
-      ],
-      { retryPaneBusy: true },
-    );
+    const command = ["pi", ...piFlags].map(shellQuote).join(" ");
+    await runHerdr(["pane", "run", paneId, command], {
+      retryPaneBusy: true,
+      expectJson: false,
+    });
   } catch (error) {
-    // herdr's pi-readiness wait is unreliable — a timeout usually means the
-    // Verifier is starting fine. Only a real (non-timeout) error is a failure;
-    // either way the pane exists and the plugin will push the Verifier's signals.
-    if (error.code !== "timeout") {
-      console.error(`spawnVerifier agent start failed: ${error.message}`);
-      await promptPane(
-        task.foremanPaneId,
-        signalEnvelope(
-          "foreman-signal",
-          { source: "system", task: task.id, status: "error" },
-          `Verifier pane created (${paneId}) but agent failed to start (${error.message}).`,
-        ),
-      );
-      return undefined;
-    }
+    console.error(`spawnVerifier pane run failed: ${error.message}`);
+    await promptPane(
+      task.foremanPaneId,
+      signalEnvelope(
+        "foreman-signal",
+        { source: "system", task: task.id, status: "error" },
+        `Verifier pane created (${paneId}) but pi failed to launch (${error.message}).`,
+      ),
+    );
+    return undefined;
   }
 
   const verifierEntry = {
