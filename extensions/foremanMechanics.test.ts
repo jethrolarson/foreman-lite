@@ -61,7 +61,7 @@ describe("Foreman command planning", () => {
     expect(command.args.filter((arg) => arg === "workspace")).toHaveLength(1);
   });
 
-  it("keeps rollback failures visible in tab diagnostics", () => {
+  it("formats rollback failure diagnostics", () => {
     expect(describeTabFailure("tab unavailable")).toBe(
       "Failed to create Task Thread tab: tab unavailable",
     );

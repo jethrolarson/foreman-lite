@@ -6,6 +6,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -25,6 +26,7 @@ export interface InboxDependencies {
   stateRoot: string;
   now: () => number;
   newId: () => string;
+  isProcessAlive?: (pid: number) => boolean;
 }
 
 export interface InboxProtocol {
@@ -33,6 +35,7 @@ export interface InboxProtocol {
     messages: string;
     delivered: string;
     failed: string;
+    delivering: string;
     owner: string;
   };
   queue: (
@@ -113,6 +116,14 @@ export const createInboxProtocol = ({
   stateRoot,
   now,
   newId,
+  isProcessAlive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  },
 }: InboxDependencies): InboxProtocol => {
   const paths = (paneId: string) => {
     const root = join(stateRoot, "inboxes", encodeURIComponent(paneId));
@@ -121,6 +132,7 @@ export const createInboxProtocol = ({
       messages: join(root, "messages"),
       delivered: join(root, "delivered"),
       failed: join(root, "failed"),
+      delivering: join(root, "delivering"),
       owner: join(root, "owner.json"),
     };
   };
@@ -131,6 +143,52 @@ export const createInboxProtocol = ({
     readJsonOptional<{ token?: string }>(paths(paneId).owner)?.token;
   const owns = (paneId: string, token: string): boolean =>
     ownerToken(paneId) === token && existsSync(claimPath(paneId, token));
+
+  const reclaimDeadLease = (lease: string): void => {
+    const candidate = `${lease}.${process.pid}.${newId()}.reclaim`;
+    try {
+      linkSync(lease, candidate);
+      const current = statSync(lease);
+      const linked = statSync(candidate);
+      if (current.dev === linked.dev && current.ino === linked.ino)
+        rmSync(lease, { force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    } finally {
+      rmSync(candidate, { force: true });
+    }
+  };
+
+  const acquireDelivery = (
+    paneId: string,
+    filename: string,
+    token: string,
+  ): string | undefined => {
+    const lease = join(paths(paneId).delivering, filename);
+    mkdirSync(dirname(lease), { recursive: true });
+    const temporary = `${lease}.${process.pid}.${newId()}.tmp`;
+    writeFileSync(
+      temporary,
+      `${JSON.stringify({ token, pid: process.pid, acquiredAt: now() })}\n`,
+      { flag: "wx" },
+    );
+    try {
+      linkSync(temporary, lease);
+      return lease;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        const holder = readJsonOptional<{ pid?: number }>(lease);
+        if (typeof holder?.pid === "number" && !isProcessAlive(holder.pid)) {
+          reclaimDeadLease(lease);
+          return acquireDelivery(paneId, filename, token);
+        }
+        return undefined;
+      }
+      throw error;
+    } finally {
+      unlinkSync(temporary);
+    }
+  };
 
   const undelivered = (paneId: string): string[] => {
     const location = paths(paneId);
@@ -187,6 +245,8 @@ export const createInboxProtocol = ({
       for (const path of undelivered(paneId)) {
         if (!owns(paneId, token)) return;
         const filename = basename(path);
+        const lease = acquireDelivery(paneId, filename, token);
+        if (!lease) continue;
         let message: InboxMessage;
         try {
           const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -199,19 +259,21 @@ export const createInboxProtocol = ({
             { failedAt: now(), error: String(error) },
             newId,
           );
+          rmSync(lease, { force: true });
           continue;
         }
         try {
           send(message);
+          writeJsonAtomic(
+            join(location.delivered, filename),
+            { messageId: message.id, sessionOwner: token, deliveredAt: now() },
+            newId,
+          );
         } catch {
+          rmSync(lease, { force: true });
           return;
         }
-        if (!owns(paneId, token)) return;
-        writeJsonAtomic(
-          join(location.delivered, filename),
-          { messageId: message.id, sessionOwner: token, deliveredAt: now() },
-          newId,
-        );
+        rmSync(lease, { force: true });
       }
     },
   };

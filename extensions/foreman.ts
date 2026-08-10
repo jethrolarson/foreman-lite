@@ -22,7 +22,6 @@ import {
   verifierDisposition,
 } from "./foremanMechanics.js";
 import { readRole } from "./roles.js";
-import { taskMetaPath } from "./taskState.js";
 
 type TaskPlacement =
   | { kind: "shared"; path: string }
@@ -59,7 +58,26 @@ interface HerdrError {
   message: string;
 }
 
-type Result<T> = { ok: true; value: T } | { ok: false; error: HerdrError };
+export type CommandResult<T> =
+  { ok: true; value: T } | { ok: false; error: HerdrError };
+type Result<T> = CommandResult<T>;
+
+export interface ForemanCommandRunner {
+  run: (executable: string, args: string[]) => Result<string>;
+  runJson: (
+    executable: string,
+    args: string[],
+  ) => Result<Record<string, unknown>>;
+}
+
+export interface ForemanDependencies {
+  commands: ForemanCommandRunner;
+  stateRoot: string;
+  now: () => number;
+  newId: () => string;
+  extensionPath: (role: "worker" | "verifier") => string;
+  queueInbox: typeof queueInboxMessage;
+}
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 const fail = (message: string, code?: string): Result<never> => ({
@@ -96,24 +114,33 @@ const writeJsonAtomic = (path: string, value: unknown): void => {
   renameSync(temporary, path);
 };
 
-const readTaskRecord = (id: string): TaskRecord | undefined =>
-  readJsonOptional<TaskRecord>(taskMetaPath(id));
+const taskMetaPathAt = (stateRoot: string, id: string): string =>
+  join(stateRoot, "tasks", id, "meta.json");
 
-const writeTaskRecord = (record: TaskRecord): void =>
-  writeJsonAtomic(taskMetaPath(record.id), record);
+const readTaskRecord = (
+  stateRoot: string,
+  id: string,
+): TaskRecord | undefined =>
+  readJsonOptional<TaskRecord>(taskMetaPathAt(stateRoot, id));
 
-const registryPath = (): string => join(homedir(), ".foreman", "registry.json");
+const writeTaskRecord = (stateRoot: string, record: TaskRecord): void =>
+  writeJsonAtomic(taskMetaPathAt(stateRoot, record.id), record);
 
-const readRegistry = (): Record<string, PaneRegistration> =>
-  readJsonOptional<Record<string, PaneRegistration>>(registryPath()) ?? {};
+const registryPath = (stateRoot: string): string =>
+  join(stateRoot, "registry.json");
+
+const readRegistry = (stateRoot: string): Record<string, PaneRegistration> =>
+  readJsonOptional<Record<string, PaneRegistration>>(registryPath(stateRoot)) ??
+  {};
 
 const writePaneRegistration = (
+  stateRoot: string,
   record: TaskRecord,
   paneId: string,
   role: PaneRegistration["role"],
 ): void => {
-  const path = registryPath();
-  const registry = readRegistry();
+  const path = registryPath(stateRoot);
+  const registry = readRegistry(stateRoot);
   registry[paneId] = { ...record, paneId, role };
   writeJsonAtomic(path, registry);
 };
@@ -180,11 +207,12 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 const runHerdrNoOutputRetryingPaneBusy = async (
+  commands: ForemanCommandRunner,
   args: string[],
   attempts = 5,
 ): Promise<Result<void>> => {
   for (let attempt = 1; ; attempt++) {
-    const result = runCommand("herdr", args);
+    const result = commands.run("herdr", args);
     if (result.ok) return ok(undefined);
     if (result.error.code !== "agent_pane_busy" || attempt >= attempts)
       return result;
@@ -192,57 +220,72 @@ const runHerdrNoOutputRetryingPaneBusy = async (
   }
 };
 
-const extensionPath = (name: "worker" | "verifier"): string =>
+const productionExtensionPath = (name: "worker" | "verifier"): string =>
   join(dirname(fileURLToPath(import.meta.url)), `${name}.ts`);
 
-const writePromptFile = (name: string, prompt: string): string => {
-  const path = join(homedir(), ".foreman", "prompts", `${name}.txt`);
+const writePromptFile = (
+  stateRoot: string,
+  name: string,
+  prompt: string,
+): string => {
+  const path = join(stateRoot, "prompts", `${name}.txt`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, prompt);
   return path;
 };
 
 const piCommand = (
+  dependencies: ForemanDependencies,
   role: "worker" | "verifier",
   record: Pick<TaskRecord, "id" | "name" | "provider" | "model">,
   promptFile: string,
 ): string =>
-  buildPiLaunchCommand(role, record, extensionPath(role), promptFile);
+  buildPiLaunchCommand(
+    role,
+    record,
+    dependencies.extensionPath(role),
+    promptFile,
+  );
 
 const createDetachedWorktree = (
+  dependencies: ForemanDependencies,
   cwd: string,
   id: string,
   revision: string,
 ): Result<TaskPlacement> => {
   const resolved = resolveRepositoryCommand(cwd);
-  const root = runCommand(resolved.executable, resolved.args);
+  const root = dependencies.commands.run(resolved.executable, resolved.args);
   if (!root.ok)
     return fail(
       `git-worktree placement requires a Git repository: ${root.error.message}`,
     );
-  const path = join(homedir(), ".foreman", "worktrees", id);
+  const path = join(dependencies.stateRoot, "worktrees", id);
   mkdirSync(dirname(path), { recursive: true });
   const command = addWorktreeCommand(root.value, path, revision);
-  const added = runCommand(command.executable, command.args);
+  const added = dependencies.commands.run(command.executable, command.args);
   return added.ok
     ? ok({ kind: "git-worktree", path, repoRoot: root.value, revision })
     : fail(added.error.message, added.error.code);
 };
 
-const removeDetachedWorktree = (placement: TaskPlacement): Result<void> => {
+const removeDetachedWorktree = (
+  commands: ForemanCommandRunner,
+  placement: TaskPlacement,
+): Result<void> => {
   if (placement.kind !== "git-worktree") return ok(undefined);
   const command = removeWorktreeCommand(placement.repoRoot, placement.path);
-  const removed = runCommand(command.executable, command.args);
+  const removed = commands.run(command.executable, command.args);
   return removed.ok ? ok(undefined) : removed;
 };
 
 const createTaskTab = (
+  commands: ForemanCommandRunner,
   workspaceId: string,
   cwd: string,
   id: string,
 ): Result<{ tabId: string; paneId: string }> => {
   const command = createTaskTabCommand(workspaceId, cwd, id);
-  const created = runJsonCommand(command.executable, command.args);
+  const created = commands.runJson(command.executable, command.args);
   if (!created.ok) return created;
   const value = created.value as {
     tab?: { tab_id?: string };
@@ -259,13 +302,20 @@ const createTaskTab = (
       );
 };
 
-const startWorker = async (record: TaskRecord): Promise<Result<void>> => {
-  const promptFile = writePromptFile(record.id, record.prompt);
+const startWorker = async (
+  dependencies: ForemanDependencies,
+  record: TaskRecord,
+): Promise<Result<void>> => {
+  const promptFile = writePromptFile(
+    dependencies.stateRoot,
+    record.id,
+    record.prompt,
+  );
   const command = runPaneCommand(
     record.workerPaneId,
-    piCommand("worker", record, promptFile),
+    piCommand(dependencies, "worker", record, promptFile),
   );
-  return runHerdrNoOutputRetryingPaneBusy(command.args);
+  return runHerdrNoOutputRetryingPaneBusy(dependencies.commands, command.args);
 };
 
 const verifierPrompt = (record: TaskRecord, context: string): string =>
@@ -278,12 +328,13 @@ const verifierPrompt = (record: TaskRecord, context: string): string =>
   ].join("\n");
 
 const startVerifier = async (
+  dependencies: ForemanDependencies,
   record: TaskRecord,
   context: string,
 ): Promise<Result<{ paneId: string; reused: boolean }>> => {
   const disposition = verifierDisposition(record.verifierPaneId);
   if (disposition.kind === "reuse") {
-    queueInboxMessage(disposition.paneId, {
+    dependencies.queueInbox(disposition.paneId, {
       customType: "foreman-verifier-directive",
       content: `New verification request for task ${record.id}:\n${context}`,
       details: { taskId: record.id, context },
@@ -297,7 +348,10 @@ const startVerifier = async (
     record.workerPaneId,
     record.cwd,
   );
-  const split = runJsonCommand(splitCommand.executable, splitCommand.args);
+  const split = dependencies.commands.runJson(
+    splitCommand.executable,
+    splitCommand.args,
+  );
   if (!split.ok) return split;
   const paneId = (split.value as { pane?: { pane_id?: string } }).pane?.pane_id;
   if (!paneId)
@@ -306,40 +360,55 @@ const startVerifier = async (
     );
 
   const promptFile = writePromptFile(
+    dependencies.stateRoot,
     `${record.id}-verifier`,
     verifierPrompt(record, context),
   );
   const paneRun = runPaneCommand(
     paneId,
-    piCommand("verifier", record, promptFile),
+    piCommand(dependencies, "verifier", record, promptFile),
   );
-  const launched = await runHerdrNoOutputRetryingPaneBusy(paneRun.args);
+  const launched = await runHerdrNoOutputRetryingPaneBusy(
+    dependencies.commands,
+    paneRun.args,
+  );
   if (!launched.ok) return launched;
 
   record.verifierPaneId = paneId;
-  writeTaskRecord(record);
-  writePaneRegistration(record, record.workerPaneId, "worker");
-  writePaneRegistration(record, paneId, "verifier");
+  writeTaskRecord(dependencies.stateRoot, record);
+  writePaneRegistration(
+    dependencies.stateRoot,
+    record,
+    record.workerPaneId,
+    "worker",
+  );
+  writePaneRegistration(dependencies.stateRoot, record, paneId, "verifier");
   return ok({ paneId, reused: false });
 };
 
-const haltWorker = (paneId: string): Result<void> => {
+const haltWorker = (
+  commands: ForemanCommandRunner,
+  paneId: string,
+): Result<void> => {
   const command = haltPaneCommand(paneId);
-  const result = runJsonCommand(command.executable, command.args);
+  const result = commands.runJson(command.executable, command.args);
   return result.ok ? ok(undefined) : result;
 };
 
-const sendOsNotification = (message: string): Result<void> => {
+const sendOsNotification = (
+  commands: ForemanCommandRunner,
+  message: string,
+): Result<void> => {
   if (process.platform === "darwin") {
     const escaped = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const sent = runCommand("osascript", [
+    const sent = commands.run("osascript", [
       "-e",
       `display notification "${escaped}" with title "Foreman" sound name "Glass"`,
     ]);
     return sent.ok ? ok(undefined) : sent;
   }
   if (process.platform === "linux") {
-    const sent = runCommand("notify-send", ["Foreman", message]);
+    const sent = commands.run("notify-send", ["Foreman", message]);
     return sent.ok ? ok(undefined) : sent;
   }
   return fail(`no notifier for platform ${process.platform}`);
@@ -351,217 +420,263 @@ const toolResult = (text: string, details?: unknown, isError?: boolean) => ({
   isError,
 });
 
-const createTaskTool = defineTool({
-  name: "create_task",
-  label: "Create Task",
-  description:
-    "Create a Task Thread as a tab in the Foreman workspace and start its Worker. Explicitly choose the shared current directory or a detached Git worktree; the Worker owns any branch or PR decision.",
-  promptSnippet: "Create a Worker Task Thread with intentional placement",
-  parameters: Type.Object({
-    name: Type.String({ description: "Short human-readable task name" }),
-    prompt: Type.String({ description: "Task instructions for the Worker" }),
-    placement: Type.Union([
-      Type.Object({ kind: Type.Literal("shared") }),
-      Type.Object({
-        kind: Type.Literal("git-worktree"),
-        revision: Type.Optional(
-          Type.String({
-            description: "Commit-ish to detach at; defaults to HEAD",
-          }),
-        ),
-      }),
-    ]),
-  }),
-  async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-    const workspaceId = process.env.HERDR_WORKSPACE_ID;
-    if (!workspaceId)
-      return toolResult(
-        "create_task requires Foreman to run inside a Herdr workspace (HERDR_WORKSPACE_ID is missing).",
-        undefined,
-        true,
-      );
-
-    const id = taskId(params.name, Date.now().toString(36));
-    const placement =
-      params.placement.kind === "shared"
-        ? ok<TaskPlacement>(sharedPlacement(ctx.cwd))
-        : createDetachedWorktree(
-            ctx.cwd,
-            id,
-            params.placement.revision ?? "HEAD",
-          );
-    if (!placement.ok)
-      return toolResult(
-        `Failed to prepare ${params.placement.kind} placement: ${placement.error.message}`,
-        undefined,
-        true,
-      );
-
-    const tab = createTaskTab(workspaceId, placement.value.path, id);
-    if (!tab.ok) {
-      const rollback = removeDetachedWorktree(placement.value);
-      return toolResult(
-        describeTabFailure(
-          tab.error.message,
-          rollback.ok ? undefined : rollback.error.message,
-        ),
-        undefined,
-        true,
-      );
-    }
-
-    const record: TaskRecord = {
-      id,
-      name: params.name,
-      prompt: params.prompt,
-      cwd: placement.value.path,
-      placement: placement.value,
-      workspaceId,
-      tabId: tab.value.tabId,
-      workerPaneId: tab.value.paneId,
-      foremanPaneId: process.env.HERDR_PANE_ID,
-      provider: process.env.PI_PROVIDER,
-      model: process.env.PI_MODEL,
-      createdAt: Date.now(),
-    };
-    writeTaskRecord(record);
-    writePaneRegistration(record, record.workerPaneId, "worker");
-
-    const started = await startWorker(record);
-    if (!started.ok)
-      return toolResult(
-        `Task ${id} is tracked in tab ${record.tabId}, but Worker launch failed: ${started.error.message}`,
-        record,
-        true,
-      );
-
-    return toolResult(
-      `Created task ${id} in tab ${record.tabId}, pane ${record.workerPaneId}, using ${record.placement.kind} placement at ${record.cwd}.`,
-      record,
-    );
-  },
-});
-
-const messageWorkerTool = defineTool({
-  name: "message_worker",
-  label: "Message Worker",
-  description:
-    "Send contextual input or a new instruction to an existing task's Worker through its structured inbox. This does not imply a lifecycle transition.",
-  promptSnippet: "Send a safe contextual message to a Worker",
-  parameters: Type.Object({
-    id: Type.String({ description: "Task id returned by create_task" }),
-    context: Type.String({
-      description: "Instruction or context for the Worker",
+const createTaskTool = (dependencies: ForemanDependencies) =>
+  defineTool({
+    name: "create_task",
+    label: "Create Task",
+    description:
+      "Create a Task Thread as a tab in the Foreman workspace and start its Worker. Explicitly choose the shared current directory or a detached Git worktree; the Worker owns any branch or PR decision.",
+    promptSnippet: "Create a Worker Task Thread with intentional placement",
+    parameters: Type.Object({
+      name: Type.String({ description: "Short human-readable task name" }),
+      prompt: Type.String({ description: "Task instructions for the Worker" }),
+      placement: Type.Union([
+        Type.Object({ kind: Type.Literal("shared") }),
+        Type.Object({
+          kind: Type.Literal("git-worktree"),
+          revision: Type.Optional(
+            Type.String({
+              description: "Commit-ish to detach at; defaults to HEAD",
+            }),
+          ),
+        }),
+      ]),
     }),
-  }),
-  async execute(_toolCallId, params) {
-    const record = readTaskRecord(params.id);
-    if (!record)
-      return toolResult(`No task found with id ${params.id}`, undefined, true);
-    const message = queueInboxMessage(record.workerPaneId, {
-      customType: "foreman-worker-directive",
-      content: `Foreman message for task ${record.id}:\n${params.context}`,
-      details: { taskId: record.id, context: params.context },
-      triggerTurn: true,
-      deliverAs: "steer",
-    });
-    return toolResult(
-      `Queued message ${message.id} for task ${record.id}'s Worker.`,
-      { task: record, message },
-    );
-  },
-});
-
-const startVerifierTool = defineTool({
-  name: "start_verifier",
-  label: "Start or Reuse Verifier",
-  description:
-    "Contextually request independent verification of any artifact, claim, or result. Starts a persistent Verifier in the task tab or reuses the existing one.",
-  promptSnippet: "Choose and describe independent verification",
-  parameters: Type.Object({
-    id: Type.String({ description: "Task id returned by create_task" }),
-    context: Type.String({
-      description:
-        "What should be verified, where its evidence lives, and what correctness means here",
-    }),
-  }),
-  async execute(_toolCallId, params) {
-    const record = readTaskRecord(params.id);
-    if (!record)
-      return toolResult(`No task found with id ${params.id}`, undefined, true);
-    const started = await startVerifier(record, params.context);
-    if (!started.ok)
-      return toolResult(
-        `Failed to start or message Verifier: ${started.error.message}`,
-        undefined,
-        true,
-      );
-    return toolResult(
-      `${started.value.reused ? "Messaged existing" : "Started"} Verifier for task ${params.id} in pane ${started.value.paneId}.`,
-      { task: record, ...started.value },
-    );
-  },
-});
-
-const haltWorkerTool = defineTool({
-  name: "halt_worker",
-  label: "Halt Worker",
-  description:
-    "Interrupt a Worker's current turn with Escape. The Task Thread and session remain available.",
-  promptSnippet: "Interrupt a Worker's current turn",
-  parameters: Type.Object({
-    id: Type.String({ description: "Task id returned by create_task" }),
-  }),
-  async execute(_toolCallId, params) {
-    const record = readTaskRecord(params.id);
-    if (!record)
-      return toolResult(`No task found with id ${params.id}`, undefined, true);
-    const halted = haltWorker(record.workerPaneId);
-    return halted.ok
-      ? toolResult(`Sent halt to task ${params.id}'s Worker.`, record)
-      : toolResult(
-          `Failed to halt task ${params.id}: ${halted.error.message}`,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const workspaceId = process.env.HERDR_WORKSPACE_ID;
+      if (!workspaceId)
+        return toolResult(
+          "create_task requires Foreman to run inside a Herdr workspace (HERDR_WORKSPACE_ID is missing).",
           undefined,
           true,
         );
-  },
-});
 
-const flagTool = defineTool({
-  name: "flag",
-  label: "Flag to Human",
-  description:
-    "Send a native OS notification when contextual judgment says the human's attention is required. Use sparingly.",
-  promptSnippet: "Notify the human about a decision or risk",
-  parameters: Type.Object({
-    context: Type.String({ description: "What needs human attention and why" }),
-  }),
-  async execute(_toolCallId, params) {
-    const sent = sendOsNotification(params.context);
-    return sent.ok
-      ? toolResult(`Notified the human: ${params.context}`, {
-          context: params.context,
-          delivered: true,
-        })
-      : toolResult(
-          `OS notification not delivered (${sent.error.message}). Flag context: ${params.context}`,
-          { context: params.context, delivered: false },
+      const id = taskId(params.name, dependencies.newId());
+      const placement =
+        params.placement.kind === "shared"
+          ? ok<TaskPlacement>(sharedPlacement(ctx.cwd))
+          : createDetachedWorktree(
+              dependencies,
+              ctx.cwd,
+              id,
+              params.placement.revision ?? "HEAD",
+            );
+      if (!placement.ok)
+        return toolResult(
+          `Failed to prepare ${params.placement.kind} placement: ${placement.error.message}`,
+          undefined,
           true,
         );
-  },
-});
+
+      const tab = createTaskTab(
+        dependencies.commands,
+        workspaceId,
+        placement.value.path,
+        id,
+      );
+      if (!tab.ok) {
+        const rollback = removeDetachedWorktree(
+          dependencies.commands,
+          placement.value,
+        );
+        return toolResult(
+          describeTabFailure(
+            tab.error.message,
+            rollback.ok ? undefined : rollback.error.message,
+          ),
+          undefined,
+          true,
+        );
+      }
+
+      const record: TaskRecord = {
+        id,
+        name: params.name,
+        prompt: params.prompt,
+        cwd: placement.value.path,
+        placement: placement.value,
+        workspaceId,
+        tabId: tab.value.tabId,
+        workerPaneId: tab.value.paneId,
+        foremanPaneId: process.env.HERDR_PANE_ID,
+        provider: process.env.PI_PROVIDER,
+        model: process.env.PI_MODEL,
+        createdAt: dependencies.now(),
+      };
+      writeTaskRecord(dependencies.stateRoot, record);
+      writePaneRegistration(
+        dependencies.stateRoot,
+        record,
+        record.workerPaneId,
+        "worker",
+      );
+
+      const started = await startWorker(dependencies, record);
+      if (!started.ok)
+        return toolResult(
+          `Task ${id} is tracked in tab ${record.tabId}, but Worker launch failed: ${started.error.message}`,
+          record,
+          true,
+        );
+
+      return toolResult(
+        `Created task ${id} in tab ${record.tabId}, pane ${record.workerPaneId}, using ${record.placement.kind} placement at ${record.cwd}.`,
+        record,
+      );
+    },
+  });
+
+const messageWorkerTool = (dependencies: ForemanDependencies) =>
+  defineTool({
+    name: "message_worker",
+    label: "Message Worker",
+    description:
+      "Send contextual input or a new instruction to an existing task's Worker through its structured inbox. This does not imply a lifecycle transition.",
+    promptSnippet: "Send a safe contextual message to a Worker",
+    parameters: Type.Object({
+      id: Type.String({ description: "Task id returned by create_task" }),
+      context: Type.String({
+        description: "Instruction or context for the Worker",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      const record = readTaskRecord(dependencies.stateRoot, params.id);
+      if (!record)
+        return toolResult(
+          `No task found with id ${params.id}`,
+          undefined,
+          true,
+        );
+      const message = dependencies.queueInbox(record.workerPaneId, {
+        customType: "foreman-worker-directive",
+        content: `Foreman message for task ${record.id}:\n${params.context}`,
+        details: { taskId: record.id, context: params.context },
+        triggerTurn: true,
+        deliverAs: "steer",
+      });
+      return toolResult(
+        `Queued message ${message.id} for task ${record.id}'s Worker.`,
+        { task: record, message },
+      );
+    },
+  });
+
+const startVerifierTool = (dependencies: ForemanDependencies) =>
+  defineTool({
+    name: "start_verifier",
+    label: "Start or Reuse Verifier",
+    description:
+      "Contextually request independent verification of any artifact, claim, or result. Starts a persistent Verifier in the task tab or reuses the existing one.",
+    promptSnippet: "Choose and describe independent verification",
+    parameters: Type.Object({
+      id: Type.String({ description: "Task id returned by create_task" }),
+      context: Type.String({
+        description:
+          "What should be verified, where its evidence lives, and what correctness means here",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      const record = readTaskRecord(dependencies.stateRoot, params.id);
+      if (!record)
+        return toolResult(
+          `No task found with id ${params.id}`,
+          undefined,
+          true,
+        );
+      const started = await startVerifier(dependencies, record, params.context);
+      if (!started.ok)
+        return toolResult(
+          `Failed to start or message Verifier: ${started.error.message}`,
+          undefined,
+          true,
+        );
+      return toolResult(
+        `${started.value.reused ? "Messaged existing" : "Started"} Verifier for task ${params.id} in pane ${started.value.paneId}.`,
+        { task: record, ...started.value },
+      );
+    },
+  });
+
+const haltWorkerTool = (dependencies: ForemanDependencies) =>
+  defineTool({
+    name: "halt_worker",
+    label: "Halt Worker",
+    description:
+      "Interrupt a Worker's current turn with Escape. The Task Thread and session remain available.",
+    promptSnippet: "Interrupt a Worker's current turn",
+    parameters: Type.Object({
+      id: Type.String({ description: "Task id returned by create_task" }),
+    }),
+    async execute(_toolCallId, params) {
+      const record = readTaskRecord(dependencies.stateRoot, params.id);
+      if (!record)
+        return toolResult(
+          `No task found with id ${params.id}`,
+          undefined,
+          true,
+        );
+      const halted = haltWorker(dependencies.commands, record.workerPaneId);
+      return halted.ok
+        ? toolResult(`Sent halt to task ${params.id}'s Worker.`, record)
+        : toolResult(
+            `Failed to halt task ${params.id}: ${halted.error.message}`,
+            undefined,
+            true,
+          );
+    },
+  });
+
+const flagTool = (dependencies: ForemanDependencies) =>
+  defineTool({
+    name: "flag",
+    label: "Flag to Human",
+    description:
+      "Send a native OS notification when contextual judgment says the human's attention is required. Use sparingly.",
+    promptSnippet: "Notify the human about a decision or risk",
+    parameters: Type.Object({
+      context: Type.String({
+        description: "What needs human attention and why",
+      }),
+    }),
+    async execute(_toolCallId, params) {
+      const sent = sendOsNotification(dependencies.commands, params.context);
+      return sent.ok
+        ? toolResult(`Notified the human: ${params.context}`, {
+            context: params.context,
+            delivered: true,
+          })
+        : toolResult(
+            `OS notification not delivered (${sent.error.message}). Flag context: ${params.context}`,
+            { context: params.context, delivered: false },
+            true,
+          );
+    },
+  });
 
 const FOREMAN_ROLE_PROMPT = readRole("foreman");
 
-export default function (pi: ExtensionAPI) {
-  pi.registerTool(createTaskTool);
-  pi.registerTool(messageWorkerTool);
-  pi.registerTool(startVerifierTool);
-  pi.registerTool(haltWorkerTool);
-  pi.registerTool(flagTool);
-  registerInbox(pi, process.env.HERDR_PANE_ID);
+export const createForemanExtension =
+  (dependencies: ForemanDependencies) =>
+  (pi: ExtensionAPI): void => {
+    pi.registerTool(createTaskTool(dependencies));
+    pi.registerTool(messageWorkerTool(dependencies));
+    pi.registerTool(startVerifierTool(dependencies));
+    pi.registerTool(haltWorkerTool(dependencies));
+    pi.registerTool(flagTool(dependencies));
+    registerInbox(pi, process.env.HERDR_PANE_ID);
 
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${FOREMAN_ROLE_PROMPT}`,
-  }));
-}
+    pi.on("before_agent_start", (event) => ({
+      systemPrompt: `${event.systemPrompt}\n\n${FOREMAN_ROLE_PROMPT}`,
+    }));
+  };
+
+const productionDependencies: ForemanDependencies = {
+  commands: { run: runCommand, runJson: runJsonCommand },
+  stateRoot: join(homedir(), ".foreman"),
+  now: Date.now,
+  newId: () => Date.now().toString(36),
+  extensionPath: productionExtensionPath,
+  queueInbox: queueInboxMessage,
+};
+
+export default createForemanExtension(productionDependencies);

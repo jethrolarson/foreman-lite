@@ -1,12 +1,18 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createInboxProtocol, type InboxMessage } from "./inboxProtocol.js";
 
 const roots: string[] = [];
-const setup = () => {
+const setup = (isProcessAlive?: (pid: number) => boolean) => {
   const stateRoot = mkdtempSync(join(tmpdir(), "foreman-inbox-"));
   roots.push(stateRoot);
   let id = 0;
@@ -14,6 +20,7 @@ const setup = () => {
     stateRoot,
     now: () => 123,
     newId: () => `id-${++id}`,
+    isProcessAlive,
   });
   return { stateRoot, protocol };
 };
@@ -115,6 +122,45 @@ describe("inbox protocol", () => {
         "utf8",
       ),
     ).toContain("missing required");
+  });
+
+  it("linearizes delivery authority with a lease across synchronous takeover", () => {
+    const { protocol } = setup();
+    protocol.queue("pane", message("one"));
+    const original = protocol.claim("pane", "original");
+    const sent: string[] = [];
+    let current = "";
+    protocol.drain("pane", original, (value) => {
+      sent.push(`original:${value.id}`);
+      current = protocol.claim("pane", "current");
+      protocol.drain("pane", current, (nested) =>
+        sent.push(`current:${nested.id}`),
+      );
+    });
+    protocol.drain("pane", current, (value) =>
+      sent.push(`current:${value.id}`),
+    );
+    expect(sent).toEqual(["original:one"]);
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(protocol.paths("pane").delivered, "one.json"),
+          "utf8",
+        ),
+      ),
+    ).toMatchObject({ messageId: "one", sessionOwner: original });
+  });
+
+  it("reclaims a delivery lease left by a dead process", () => {
+    const { protocol } = setup(() => false);
+    protocol.queue("pane", message("one"));
+    const owner = protocol.claim("pane", "session");
+    const lease = join(protocol.paths("pane").delivering, "one.json");
+    mkdirSync(dirname(lease), { recursive: true });
+    writeFileSync(lease, JSON.stringify({ pid: 999, token: "dead" }));
+    const sent: InboxMessage[] = [];
+    protocol.drain("pane", owner, (value) => sent.push(value));
+    expect(sent.map(({ id }) => id)).toEqual(["one"]);
   });
 
   it("prevents stale owners from delivering or deleting the current claim", () => {

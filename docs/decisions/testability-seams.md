@@ -10,11 +10,13 @@ The inbox filesystem protocol is separate from its Pi lifecycle adapter. Product
 
 Owner claims use two records: `owner.json` selects the current token and `owners/<token>.json` proves that token is still live. Shutdown removes only its token record. This avoids the check-then-unlink race where an old session could delete a newer session's claim. The selector may remain after shutdown, but cannot authorize delivery without its matching claim; no inbox-retention policy is implied.
 
-Foreman command construction lives in `extensions/foremanMechanics.ts`. It returns executable/argument plans while `foreman.ts` retains process execution, filesystem state, retry behavior, and contextual tool policy. This is intentionally narrower than a general command framework.
+Each send also acquires an atomic `delivering/<message>.json` lease before its authority check can become stale. Lease acquisition is the delivery-authority linearization point: a session that owned the inbox there may finish its synchronous `sendMessage` and receipt even if another session claims the inbox during the call, while the new owner cannot concurrently redeliver that message. A thrown send releases the lease for the next drain. A lease whose recorded process is dead is reclaimable, preserving crash recovery; a live holder remains authoritative until it writes the receipt or releases after failure.
+
+Foreman command construction lives in `extensions/foremanMechanics.ts`. It returns executable/argument plans while `foreman.ts` retains filesystem state, retry behavior, and contextual tool policy. `createForemanExtension` accepts a narrow runner with `run` and `runJson`; production binds it to `execFileSync`, while execution-level tests record deterministic Git/Herdr calls and outcomes. This is intentionally narrower than a general command framework.
 
 The Herdr hook's event selection and notification construction live in `plugins/task-events/notify-core.mjs`. `notify.mjs` remains the process/environment adapter and the only module that may query Herdr. The pure module never exits a process or starts another role.
 
-Vitest is the default local suite. Live Herdr validation remains separate and documented in `docs/handoff.md`; default tests require no Herdr server and make no model calls.
+Vitest is the default local suite. Extension integration tests use Pi's public `DefaultResourceLoader`, `ExtensionRunner`, and `SessionManager.inMemory()` to exercise tool registration, prompt hooks, lifecycle events, and structured message delivery without a model call. Live Herdr validation remains separate and documented in `docs/handoff.md`; default tests require no Herdr server and make no model calls.
 
 ## Intentionally unresolved
 

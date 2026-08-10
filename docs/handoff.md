@@ -44,6 +44,7 @@ The redesign now encodes mechanics rather than a fixed PR workflow:
 ├── inboxes/<encoded-pane-id>/
 │   ├── owner.json
 │   ├── owners/<token>.json
+│   ├── delivering/
 │   ├── messages/
 │   ├── delivered/
 │   └── failed/
@@ -51,7 +52,7 @@ The redesign now encodes mechanics rather than a fixed PR workflow:
 └── worktrees/
 ```
 
-Task records contain discriminated placement metadata, workspace/tab/pane IDs, and optional Verifier pane ID. They do not require branch, PR, or worktree fields. `owner.json` selects a session token while `owners/<token>.json` proves the claim is live, so stale shutdown cannot unlink a newer claim.
+Task records contain discriminated placement metadata, workspace/tab/pane IDs, and optional Verifier pane ID. They do not require branch, PR, or worktree fields. `owner.json` selects a session token while `owners/<token>.json` proves the claim is live, so stale shutdown cannot unlink a newer claim. Atomic `delivering/` leases serialize synchronous send/receipt authority across session takeover and are reclaimed when their recorded process is dead.
 
 ## Live validation evidence
 
