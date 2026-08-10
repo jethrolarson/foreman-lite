@@ -1,6 +1,6 @@
 # Worker and Verifier model selection
 
-**Status:** investigation and design recommendation, 2026-08-09
+**Status:** investigation and design recommendation, revised after independent review on 2026-08-09
 
 **Shelf life:** revisit when Pi's model CLI/API changes, Foreman stops launching role sessions as `pi` subprocesses, or measured model profiles replace the proposed rubric. Product model names and prices should live in configuration, not this document.
 
@@ -40,7 +40,7 @@ Relevant capabilities:
 4. **The SDK can construct a session with an explicit `model` and `thinkingLevel`,** and restores/defaults/falls back when a model is omitted. Moving Foreman to SDK-owned sessions would expose more control but is unnecessary for initial selection and would replace the working Herdr-visible subprocess topology.
 5. **Defaults are directory-sensitive.** Global and project `.pi/settings.json` can define `defaultProvider`, `defaultModel`, and `defaultThinkingLevel`; project settings override global settings. If no model is supplied, Pi restores a session model, then uses settings, then the first available model. That is useful for ordinary interactive Pi but too implicit for a recorded orchestration decision.
 6. **Availability is not capability quality.** Model metadata exposes provider/id, context window, output limit, input modalities, reasoning support, and configured token prices. It does not establish coding accuracy, latency, tool-use reliability, or independence from another model. Those require measured, deployment-specific profiles.
-7. **Custom providers and model catalogues are supported.** Exact IDs cannot be assumed globally; validation must use the Foreman Pi runtime's effective registry and authentication, including `models.json` and extension-registered providers.
+7. **Custom providers and model catalogues are supported, but registries are context-dependent.** Built-ins plus user-level `models.json`/auth are process-global inputs, while extension-registered providers can depend on the process's loaded resources, cwd, project revision, and trust decision. A Foreman `ctx.modelRegistry` is therefore not automatically authoritative for a child launched in a target worktree. Exact IDs cannot be assumed globally.
 
 ## Current constraints and failure modes
 
@@ -54,6 +54,7 @@ Relevant capabilities:
 | Launch success only means Herdr accepted the shell command | Unknown model, missing auth, or provider failure can occur after placement/tab side effects or during the initial turn. |
 | A persistent Verifier is reused | A later request cannot silently demand another model without either switching the live session or creating a new verification context. |
 | Worker and Verifier share a cwd and user configuration | Available providers and privacy/cost policy are installation concerns, not facts Foreman should invent. |
+| Foreman and child resource contexts can differ | Foreman's registry may accept a provider that the target-cwd child lacks, or miss/describe one that a trusted project extension adds or overrides. |
 | No model-quality telemetry is recorded | A rubric cannot be calibrated from outcomes yet. |
 
 ## Feasible control points
@@ -75,19 +76,27 @@ start_verifier({ ..., verifierModel?: AgentModelSelection })
 
 Resolve omitted values to a concrete effective selection before any Git/Herdr side effect, persist it by role, and launch with all three exact flags. Separate fields are preferable to a free-form model pattern because they are typeable, auditable, and avoid accidental wildcard/name matching.
 
-Validation should:
+The initial implementation needs an explicit **common-registry contract**; Foreman's current `ctx.modelRegistry` alone is not sufficient:
 
-1. find the exact provider/model in `ctx.modelRegistry`;
+- Supported role profiles may reference Pi built-ins/catalogues, user-level `models.json` plus user-level auth, and explicitly configured provider extensions only when the same extension paths are allowlisted in validation and launch. Auto-discovered project/provider extensions are out of scope for v1.
+- Launch role processes with auto-discovered extensions disabled (`--no-extensions`) and load the Worker or Verifier extension explicitly with `-e`. Otherwise a trusted project extension in the target cwd can add or override the selected provider after Foreman validated a different composition. Additional role/provider extensions must come from the common allowlist; provider registration outside it is prohibited.
+- Resolve/validate in a dedicated runtime composed from `ModelRuntime` and the exact user agent directory, models file, credentials, and allowlisted provider-extension paths used by the child launch—not against the Foreman session's fully composed registry. Exact CLI flags then override project default settings.
+
+Under that contract, validation should:
+
+1. find the exact provider/model in the common launch registry;
 2. require configured authentication/availability;
 3. check requested thinking against model capability and reject unsupported intent rather than silently changing assurance;
 4. check hard task constraints available to Foreman (context, images, provider/privacy policy);
-5. return the resolved provider, model ID, thinking level, context window, and profile revision in tool details.
+5. return the resolved provider, model ID, thinking level, context window, registry-policy revision, and profile revision in tool details.
 
-The CLI remains the final enforcement point. Registry preflight improves errors and avoids creating a worktree/tab for a selection already known to be unusable.
+The child remains the final enforcement point. Its role extension should persist the actual `ctx.model` and `ctx.thinkingLevel` at `session_start`; the first role signal and launch diagnostics should expose requested versus observed values. A mismatch is a launch failure, not a successful fallback.
+
+If extension-registered/project-local providers become a requirement, replace the v1 restriction with a **target-child-context preflight**: after the target revision/cwd exists but before the initial LLM turn, start a probe with the exact child cwd, trust decision, resource flags, agent directory, and provider extensions; have it resolve auth/model/thinking and write an atomic acknowledgement. Launch the role only after that acknowledgement. A timeout, unavailable model, or mismatch must fail visibly and roll back whatever placement/session resources were created. Tests must include a provider registered only in the Foreman context, only in the target project, and overridden differently in each. A generic `pi --list-models` table or Foreman-side lookup is not an adequate machine-readable substitute.
 
 ### 2. Capture the active Foreman selection through `ctx` — suitable default source
 
-When no role-specific selection is requested, use `ctx.model` and `ctx.thinkingLevel`, not `process.env`. This preserves today's apparent intention to inherit Foreman's model while making the result explicit and durable. It is a fallback, not the rubric: Foreman should pass a deliberate choice when task characteristics justify one.
+When no role-specific selection and no role default is configured, `ctx.model` and `ctx.thinkingLevel` may nominate the exact selection, rather than reading `process.env`. The nominated pair must still exist and authenticate in the common launch registry; Foreman's registry membership does not waive child validation. This preserves today's apparent intention to inherit Foreman's model while making the result explicit and durable. It is an input chosen before validation, not a fallback after another choice fails.
 
 ### 3. In-session model switching through the role extension — defer
 
@@ -122,26 +131,28 @@ type TaskRecord = {
 };
 ```
 
-The profile maps should be installation configuration, for example a global Foreman config containing exact provider/model/thinking triples plus measured latency, tool reliability, and allowed data classes. Keep product IDs out of role prompts and out of the rubric so model catalogue churn is a config update, not a policy rewrite.
+The profile maps should be user-level Foreman configuration, containing exact provider/model/thinking triples plus measured latency, tool reliability, allowed data classes, and a common-registry policy revision. Under the v1 contract they cannot name auto-discovered project providers; an extension-registered provider must be in the explicit common allowlist. Keep product IDs out of role prompts and out of the rubric so model catalogue churn is a config update, not a policy rewrite.
 
 Foreman's tool result and eventual role signal should report the effective `provider/model:thinking`, not only the requested alias. Session assistant messages already record actual provider/model, so a later adapter can audit requested versus observed selection.
 
 ## Defaults and fallback behavior
 
-Recommended resolution order for a **new role session**:
+Choose exactly one source for a **new role session**, in this order:
 
-1. explicit selection supplied by Foreman;
-2. configured role default (`worker` and `verifier` may differ);
-3. concrete active Foreman `ctx.model` plus `ctx.thinkingLevel`;
+1. explicit selection supplied by Foreman, if present;
+2. configured role default (`worker` and `verifier` may differ), if present;
+3. concrete active Foreman `ctx.model` plus `ctx.thinkingLevel`, only when neither of the above exists;
 4. otherwise fail before placement/session creation.
 
-Do not delegate the last step to Pi's “first available model” fallback. It is valid interactive behavior but makes cost and assurance dependent on catalogue order.
+After a source is chosen, validate it against the common launch registry. **Do not continue down the list when the chosen selection is unknown, unavailable, unauthenticated, or unsupported.** The ordering fills an omitted policy value; it is not a runtime substitution chain. Persist `selectedBy` before launch and report the same source in tool details.
+
+Do not delegate selection to Pi's “first available model” fallback. It is valid interactive behavior but makes cost and assurance dependent on catalogue order.
 
 Failure rules:
 
-- **Explicit or configured selection unknown/unavailable:** fail closed and list bounded available profile names or exact candidates. Do not silently substitute.
+- **Any chosen selection unknown/unavailable:** fail closed and list bounded available profile names or exact candidates. This includes an unavailable configured role default and an active-Foreman nomination absent from the common registry. Do not silently substitute.
 - **Unsupported thinking level:** fail closed. Silent clamping makes the durable record lie about intended reasoning.
-- **Role default unavailable:** fall through only to the captured active Foreman selection and mark `selectedBy`; do not search arbitrary providers.
+- **Observed child mismatch:** fail the launch and retain requested/observed values in diagnostics; never relabel it as success under another model.
 - **Runtime provider failure after launch:** let Pi's same-provider retry policy operate. Do not automatically cross-provider switch a persistent session in v1. Report the failure and let Foreman choose retry, a fresh session, or human escalation.
 - **Reused session:** retain its recorded effective selection. A conflicting new request is an explicit error until model-switch/fresh-role semantics exist.
 
@@ -228,13 +239,14 @@ Do not compare raw model outcomes across dissimilar task scores; otherwise the r
 ## Recommended implementation sequence
 
 1. **Recover the testable mechanics boundary first.** Rebase/restore the `foremanMechanics` and injected-runner test seams from the `test-refactor-backfill` history; they are absent from this checkout's HEAD.
-2. Add pure selection types, exact registry resolution, thinking-capability validation, and role-specific persisted fields. Validate before Git/Herdr side effects.
-3. Extend `create_task` with optional `workerModel` and `start_verifier` with optional `verifierModel`; update their prompt descriptions with the concise rubric and justification rather than embedding product IDs.
-4. Pass exact `--provider`, `--model`, and `--thinking` flags. Return and display the effective selection.
-5. Add deterministic tests for explicit selection, role defaults, active-`ctx` fallback, unavailable/auth failure, unsupported thinking, shell quoting, Worker/Verifier divergence, legacy records, and conflicting selection on Verifier reuse. Do not make paid model calls in the default suite.
-6. Add a live smoke test with two inexpensive authenticated models: create a Worker and Verifier, inspect their session assistant metadata/Bash environment, and prove the persisted effective selections match. Include one invalid model and prove no worktree/tab is created.
-7. Add outcome telemetry before tuning thresholds. Keep profile mappings in user-level Foreman configuration and review them when catalogues, pricing, or measured reliability change.
+2. Establish the common-registry boundary: dedicated user-level launch registry, `--no-extensions` plus explicit role extension, and an allowlist for any additional provider extensions. Record its policy revision.
+3. Add pure selection types, exact common-registry resolution, thinking-capability validation, and role-specific persisted fields. Choose one source, then fail closed if it is invalid; do not substitute.
+4. Extend `create_task` with optional `workerModel` and `start_verifier` with optional `verifierModel`; update their prompt descriptions with the concise rubric and justification rather than embedding product IDs.
+5. Pass exact `--provider`, `--model`, and `--thinking` flags. Persist requested and actual child selection; return and display the effective selection.
+6. Add deterministic tests for explicit selection, omitted-selection source order, unavailable explicit/default/active selections all failing closed, unsupported thinking, shell quoting, Worker/Verifier divergence, legacy records, and conflicting selection on Verifier reuse. Add a trusted target-project extension that registers/overrides a provider and prove v1 ignores it; prove an allowlisted provider has identical metadata in validator and child. Do not make paid model calls in the default suite.
+7. Add a live smoke test with two inexpensive authenticated models: create a Worker and Verifier, inspect their session assistant metadata/Bash environment, and prove the persisted effective selections match. Include one invalid model and prove no worktree/tab is created. Include a target worktree with different project defaults/provider registration and prove exact selection plus the common-registry boundary hold.
+8. Add outcome telemetry before tuning thresholds. Keep profile mappings in user-level Foreman configuration and review them when catalogues, pricing, or measured reliability change.
 
 ## Decision summary
 
-Use the existing Pi CLI process launch as the enforcement boundary. Give Foreman explicit per-role model/thinking parameters, validate them through the current Pi registry, persist the effective result, and fail visibly rather than accepting Pi's arbitrary final fallback. Select capability profiles with hard compatibility/context filters plus the risk-weighted rubric above; use latency and cost to choose within an adequate tier. Treat Verifier independence as a measurable assurance strategy, not a rule that every task must spawn another agent.
+Use the existing Pi CLI process launch as the enforcement boundary. Give Foreman explicit per-role model/thinking parameters, validate them through a registry demonstrably shared with the child—not Foreman's context-dependent registry—persist requested and observed results, and fail visibly rather than substituting or accepting Pi's arbitrary final fallback. Select capability profiles with hard compatibility/context filters plus the risk-weighted rubric above; use latency and cost to choose within an adequate tier. Treat Verifier independence as a measurable assurance strategy, not a rule that every task must spawn another agent.
