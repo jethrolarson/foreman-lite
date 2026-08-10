@@ -50,6 +50,16 @@ function calledWorkerSignal(messages: AgentMessage[]): boolean {
   );
 }
 
+function endedWithModelError(messages: AgentMessage[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.role === "assistant" && "stopReason" in message)
+      return message.stopReason === "error";
+  }
+  return false;
+}
+
 function appendTaskEvent(
   worktreeRoot: string,
   action: WorkerAction,
@@ -148,7 +158,12 @@ export default function (pi: ExtensionAPI) {
   let nagCount = 0;
 
   pi.on("agent_end", (event) => {
-    if (calledWorkerSignal(event.messages)) {
+    if (
+      calledWorkerSignal(event.messages) ||
+      endedWithModelError(event.messages)
+    ) {
+      // A provider/model error gave the agent no chance to signal. Retrying the
+      // model as a behavioral correction only repeats the failed paid request.
       nagCount = 0;
       return;
     }

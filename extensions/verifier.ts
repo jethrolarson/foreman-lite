@@ -40,6 +40,16 @@ function calledVerifierSignal(messages: AgentMessage[]): boolean {
   );
 }
 
+function endedWithModelError(messages: AgentMessage[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.role === "assistant" && "stopReason" in message)
+      return message.stopReason === "error";
+  }
+  return false;
+}
+
 function appendTaskEvent(
   worktreeRoot: string,
   action: VerifierAction,
@@ -117,7 +127,12 @@ export default function (pi: ExtensionAPI) {
   let nagCount = 0;
 
   pi.on("agent_end", (event) => {
-    if (calledVerifierSignal(event.messages)) {
+    if (
+      calledVerifierSignal(event.messages) ||
+      endedWithModelError(event.messages)
+    ) {
+      // Provider/model errors aren't behavioral omissions; corrective turns
+      // only repeat a request that cannot currently succeed.
       nagCount = 0;
       return;
     }

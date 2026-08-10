@@ -107,6 +107,11 @@ deliverAs: "followUp" })`, forcing another run before the session is
   - **Not verified live**: the `MAX_NAGS_PER_RUN` cutoff-and-settle
     branch itself (hard to force a model to stonewall on purpose).
     Implemented, untested.
+  - Provider/model failures (`stopReason: "error"`) bypass corrective
+    turns. CONTEXT: a live 429 insufficient-balance error was observed
+    triggering repeated paid retries because the hook mistook failure for
+    noncompliance; mocked Worker/Verifier hooks now verify zero retries for
+    errors while ordinary omissions still get one.
 
 ### `extensions/verifier.ts` — Verifier's capability
 
