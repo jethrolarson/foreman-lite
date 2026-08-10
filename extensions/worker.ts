@@ -8,10 +8,9 @@
  * `flag` reports blocked state to herdr (if the herdr pi integration is
  * installed) via the same `herdr:blocked` event its own extension listens
  * for — see `herdr integration install pi`. `planned`/`done` clear it.
- * Domain-level routing detail (the `context` argument) is appended under
- * `~/.foreman/tasks/<id>/`, outside the worktree, so it survives pane/session
- * lifecycle without dirtying the user's source tree. Durable review detail
- * lives in marked GitHub PR comments.
+ * Domain-level routing detail is appended under `~/.foreman/tasks/<id>/`,
+ * outside the task directory, so shared-directory and isolated tasks use the
+ * same durable protocol without dirtying source trees.
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -20,8 +19,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
-import { taskIdFromCwd, taskEventsPath } from "./taskState.js";
+import { taskEventsPath, taskIdFromEnvironment } from "./taskState.js";
 
 type WorkerAction = "planned" | "done" | "flag";
 
@@ -50,27 +50,26 @@ function calledWorkerSignal(messages: AgentMessage[]): boolean {
   );
 }
 
-function endedWithModelError(messages: AgentMessage[]): boolean {
+function endedWithModelFailure(messages: AgentMessage[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message) continue;
     if (message.role === "assistant" && "stopReason" in message)
-      return message.stopReason === "error";
+      return message.stopReason === "error" || message.stopReason === "aborted";
   }
   return false;
 }
 
 function appendTaskEvent(
-  worktreeRoot: string,
+  taskId: string,
   action: WorkerAction,
   context: string,
-  prUrl?: string,
 ): void {
-  const path = taskEventsPath(taskIdFromCwd(worktreeRoot));
+  const path = taskEventsPath(taskId);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(
     path,
-    `${JSON.stringify({ role: "worker", action, context, prUrl, timestamp: Date.now() })}\n`,
+    `${JSON.stringify({ role: "worker", action, context, timestamp: Date.now() })}\n`,
   );
 }
 
@@ -85,15 +84,15 @@ function describeAction(action: WorkerAction, context: string): string {
   }
 }
 
-function buildWorkerSignalTool(pi: ExtensionAPI) {
+function buildWorkerSignalTool(pi: ExtensionAPI, taskId: string) {
   return defineTool({
     name: "worker_signal",
     label: "Worker Signal",
     description:
-      "Emit a lifecycle signal: `planned` (pause for Foreman plan input), `done` (committed work pushed and a PR opened; prUrl required), or `flag` (blocked, needs input). Every turn must end with one once work has progressed or stalled — don't emit planned as a routine progress ping because it terminates the turn.",
+      "Emit a lifecycle signal: `planned` (pause for Foreman input), `done` (the requested result is ready; describe its artifact or outcome in context), or `flag` (blocked, needs input). Every substantive turn must end with one. A branch, commit, or PR is optional and depends on the task.",
     promptSnippet: "Emit a Worker lifecycle signal (planned/done/flag)",
     promptGuidelines: [
-      "Before done, commit and push the work, open the PR, and supply its URL. Prefer flag-and-be-safe over done-and-wrong.",
+      "For done, identify the result in context: it may be prose, a path, report, spec, commit, PR, or another artifact. Prefer flag-and-be-safe over done-and-wrong.",
     ],
     parameters: Type.Union([
       Type.Object({
@@ -104,9 +103,9 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
       }),
       Type.Object({
         action: Type.Literal("done"),
-        context: Type.String({ description: "What changed and was tested" }),
-        prUrl: Type.String({
-          description: "URL of the pull request opened for this work",
+        context: Type.String({
+          description:
+            "What result is ready, where it can be found, and how it was checked",
         }),
       }),
       Type.Object({
@@ -115,10 +114,8 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
       }),
     ]),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const worktreeRoot = ctx.cwd;
-      const prUrl = params.action === "done" ? params.prUrl : undefined;
-      appendTaskEvent(worktreeRoot, params.action, params.context, prUrl);
+    async execute(_toolCallId, params) {
+      appendTaskEvent(taskId, params.action, params.context);
 
       pi.events.emit("herdr:blocked", {
         active: params.action === "flag",
@@ -129,7 +126,7 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
         content: [
           { type: "text", text: describeAction(params.action, params.context) },
         ],
-        details: { action: params.action, context: params.context, prUrl },
+        details: { action: params.action, context: params.context },
         terminate: true,
       };
     },
@@ -137,8 +134,9 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerTool(buildWorkerSignalTool(pi));
-  const taskId = taskIdFromCwd(process.cwd());
+  const taskId = taskIdFromEnvironment();
+  pi.registerTool(buildWorkerSignalTool(pi, taskId));
+  registerInbox(pi, process.env.HERDR_PANE_ID);
 
   pi.on("before_agent_start", (event) => ({
     systemPrompt: `${event.systemPrompt}\n\nYour foreman-lite task id is \`${taskId}\`.\n\n${WORKER_ROLE_PROMPT}`,
@@ -160,10 +158,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", (event) => {
     if (
       calledWorkerSignal(event.messages) ||
-      endedWithModelError(event.messages)
+      endedWithModelFailure(event.messages)
     ) {
-      // A provider/model error gave the agent no chance to signal. Retrying the
-      // model as a behavioral correction only repeats the failed paid request.
+      // Provider/model errors and an explicit halt give the agent no chance to
+      // signal. A corrective turn would retry a failed or intentionally aborted
+      // operation instead of respecting the halt.
       nagCount = 0;
       return;
     }

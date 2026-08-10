@@ -1,126 +1,46 @@
-/**
- * Foreman extension: gives a pi session the capability to create Task
- * Threads (Worker agents running in their own git worktree + herdr pane).
- *
- * Load this only for the session you talk to as Foreman — e.g. via an
- * alias like:
- *
- *   alias piforeman='pi -e /path/to/foreman-lite/extensions/foreman.ts'
- *
- * Run from the target project's repo root. Worker panes are spawned by
- * this extension's own code with extensions/worker.ts (not foreman.ts)
- * passed via -e, so they never gain this capability just because you
- * happen to use the alias to start Foreman — see docs/vision.md and
- * CLAUDE.md for the reasoning.
- *
- * Built on herdr (https://herdr.dev) for pane/worktree management and
- * state tracking rather than raw tmux — see docs/handoff.md for what was
- * verified and why. Requires `herdr integration install pi` to have been
- * run once on this machine (installs the pi<->herdr state-reporting
- * extension globally; this file doesn't do that for you).
- *
- * Also provides `halt_worker`. An event/state watcher (Verifier spawn on
- * `done`) is still a follow-up — see docs/handoff.md.
- */
-
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { queueInboxMessage, registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
-import { taskMetaPath, taskStateDir } from "./taskState.js";
+import { taskMetaPath } from "./taskState.js";
 
-// Task records are role-discriminated so illegal states (e.g. a worker
-// entry carrying workerPaneId) are unrepresentable. Both variants share the
-// base; the registry is one JSON map keyed by pane id holding either.
-interface TaskRecordBase {
+type TaskPlacement =
+  | { kind: "shared"; path: string }
+  | {
+      kind: "git-worktree";
+      path: string;
+      repoRoot: string;
+      revision: string;
+    };
+
+interface TaskRecord {
   id: string;
-  // Human-readable task name (params.name) — used for pi session --name so
-  // sessions aren't cryptic, and so the Verifier spawn can name itself.
   name: string;
-  repoRoot: string;
-  worktreePath: string;
-  branch: string;
-  paneId: string;
   prompt: string;
-  // Set from the Worker's done signal; routes review and merge attention.
-  prUrl?: string;
-  // Forwarded from Foreman's env so spawned Verifiers use a working config.
+  cwd: string;
+  placement: TaskPlacement;
+  workspaceId: string;
+  tabId: string;
+  workerPaneId: string;
+  verifierPaneId?: string;
+  foremanPaneId?: string;
   provider?: string;
   model?: string;
-  // Foreman's own pane (HERDR_PANE_ID); undefined outside herdr.
-  foremanPaneId?: string;
   createdAt: number;
 }
 
-interface WorkerRecord extends TaskRecordBase {
-  role: "worker";
-  sessionPath?: string;
-  // Set once the Verifier spawns for this task.
-  verifierPaneId?: string;
+interface PaneRegistration extends TaskRecord {
+  paneId: string;
+  role: "worker" | "verifier";
 }
 
-interface VerifierRecord extends TaskRecordBase {
-  role: "verifier";
-  workerPaneId: string;
-}
-
-type TaskRecord = WorkerRecord | VerifierRecord;
-
-// --- pure helpers -----------------------------------------------------
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-function taskId(name: string, suffix: string): string {
-  // Keep the historical 32-char id bound for compact branch, label, registry,
-  // and session displays; leave room for the 8-char timestamp suffix.
-  const slug = slugify(name).slice(0, 23);
-  return slug ? `${slug}-${suffix}` : suffix;
-}
-
-function branchFor(id: string): string {
-  return `task/${id}`;
-}
-
-// meta.json is only ever written by create_task for a worker record, so
-// this is narrowly typed rather than the full TaskRecord union.
-function readTaskRecord(id: string): WorkerRecord | undefined {
-  return readJsonOptional<WorkerRecord>(taskMetaPath(id));
-}
-
-function workerExtensionPath(): string {
-  // extensions/worker.ts, sibling of this file, regardless of cwd.
-  return join(dirname(fileURLToPath(import.meta.url)), "worker.ts");
-}
-
-// Read & parse a JSON file we own. Missing (ENOENT) = absent; anything else
-// (corrupt, permission) surfaces rather than masquerading as empty.
-function readJsonOptional<T>(path: string): T | undefined {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  return JSON.parse(raw) as T;
-}
-
-// --- herdr, at the edge -------------------------------------------------
-
-// Values over exceptions: herdr calls return a Result so the signature
-// tells the truth about failure (no hidden throws). Intermediary functions
-// propagate the error value, making which calls can fail visible at every
-// call site.
 interface HerdrError {
   code?: string;
   message: string;
@@ -129,309 +49,482 @@ interface HerdrError {
 type Result<T> = { ok: true; value: T } | { ok: false; error: HerdrError };
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
-const fail = (error: HerdrError): Result<never> => ({ ok: false, error });
-const err = (message: string, code?: string): Result<never> =>
-  fail({ message, code });
+const fail = (message: string, code?: string): Result<never> => ({
+  ok: false,
+  error: { message, code },
+});
 
-// Extract a HerdrError from herdr's stderr. Herdr normally writes a JSON
-// error body; if stderr isn't JSON (or lacks .error), fall back to the raw
-// stderr string with unknown code rather than discarding it — the raw text
-// is more informative than Node's generic "Command failed" string.
-function herdrErrorFromStderr(stderr: string): HerdrError {
-  try {
-    const parsed = JSON.parse(stderr);
-    if (parsed?.error)
-      return { message: parsed.error.message, code: parsed.error.code };
-  } catch {
-    // not JSON — use the raw stderr below
-  }
-  return { message: stderr.trim(), code: undefined };
-}
+const slugify = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 
-function runHerdr(args: string[]): Result<Record<string, unknown>> {
-  let stdout: string;
+const taskId = (name: string, suffix: string): string => {
+  const slug = slugify(name).slice(0, 23);
+  return slug ? `${slug}-${suffix}` : suffix;
+};
+
+const readJsonOptional = <T>(path: string): T | undefined => {
   try {
-    stdout = execFileSync("herdr", args, { encoding: "utf8" });
+    return JSON.parse(readFileSync(path, "utf8")) as T;
   } catch (error) {
-    return fail(herdrExecError(args, error));
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return err(`herdr ${args.join(" ")} returned non-JSON: ${stdout}`);
-  }
-  if (!(parsed as { result?: unknown })?.result) {
-    return err(`herdr ${args.join(" ")} returned no result: ${stdout}`);
-  }
-  return ok((parsed as { result: Record<string, unknown> }).result);
-}
+};
 
-function herdrExecError(args: string[], error: unknown): HerdrError {
-  const maybeStderr = (
-    error as { stderr?: Buffer | string }
-  )?.stderr?.toString();
-  if (maybeStderr) {
-    const parsed = herdrErrorFromStderr(maybeStderr);
+const writeJsonAtomic = (path: string, value: unknown): void => {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+    flag: "wx",
+  });
+  renameSync(temporary, path);
+};
+
+const readTaskRecord = (id: string): TaskRecord | undefined =>
+  readJsonOptional<TaskRecord>(taskMetaPath(id));
+
+const writeTaskRecord = (record: TaskRecord): void =>
+  writeJsonAtomic(taskMetaPath(record.id), record);
+
+const registryPath = (): string => join(homedir(), ".foreman", "registry.json");
+
+const readRegistry = (): Record<string, PaneRegistration> =>
+  readJsonOptional<Record<string, PaneRegistration>>(registryPath()) ?? {};
+
+const writePaneRegistration = (
+  record: TaskRecord,
+  paneId: string,
+  role: PaneRegistration["role"],
+): void => {
+  const path = registryPath();
+  const registry = readRegistry();
+  registry[paneId] = { ...record, paneId, role };
+  writeJsonAtomic(path, registry);
+};
+
+const parseCommandError = (
+  executable: string,
+  args: string[],
+  error: unknown,
+): HerdrError => {
+  const stderr = (error as { stderr?: Buffer | string }).stderr?.toString();
+  if (stderr) {
+    try {
+      const parsed = JSON.parse(stderr) as {
+        error?: { message?: string; code?: string };
+      };
+      if (parsed.error?.message)
+        return {
+          message: `${executable} ${args.join(" ")} failed: ${parsed.error.message}`,
+          code: parsed.error.code,
+        };
+    } catch {
+      // Fall through to the exact stderr text.
+    }
     return {
-      message: `herdr ${args.join(" ")} failed: ${parsed.message}`,
-      code: parsed.code,
+      message: `${executable} ${args.join(" ")} failed: ${stderr.trim()}`,
     };
   }
-  return { message: `herdr ${args.join(" ")} failed: ${String(error)}` };
-}
+  return {
+    message: `${executable} ${args.join(" ")} failed: ${String(error)}`,
+  };
+};
 
-// `pane run` succeeds without a JSON result body: it atomically submits the
-// command to the target shell and returns. The pi integration/plugin then
-// reports real lifecycle state, so no startup-readiness wait is needed.
-function runHerdrNoOutput(args: string[]): Result<void> {
+const runJsonCommand = (
+  executable: string,
+  args: string[],
+): Result<Record<string, unknown>> => {
+  let stdout: string;
   try {
-    execFileSync("herdr", args, { encoding: "utf8" });
-    return ok(undefined);
+    stdout = execFileSync(executable, args, { encoding: "utf8" });
   } catch (error) {
-    return fail(herdrExecError(args, error));
+    const parsed = parseCommandError(executable, args, error);
+    return fail(parsed.message, parsed.code);
   }
-}
+  try {
+    const parsed = JSON.parse(stdout) as { result?: Record<string, unknown> };
+    return parsed.result
+      ? ok(parsed.result)
+      : fail(`${executable} returned no result: ${stdout}`);
+  } catch {
+    return fail(`${executable} returned non-JSON: ${stdout}`);
+  }
+};
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const runCommand = (executable: string, args: string[]): Result<string> => {
+  try {
+    return ok(execFileSync(executable, args, { encoding: "utf8" }).trim());
+  } catch (error) {
+    const parsed = parseCommandError(executable, args, error);
+    return fail(parsed.message, parsed.code);
+  }
+};
 
-// `worktree create`'s pane is occasionally not at a shell prompt yet
-// (`agent_pane_busy`) — a real transient race. Retry beats a blind sleep.
-async function runHerdrNoOutputRetryingPaneBusy(
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+const runHerdrNoOutputRetryingPaneBusy = async (
   args: string[],
   attempts = 5,
-  delayMs = 500,
-): Promise<Result<void>> {
+): Promise<Result<void>> => {
   for (let attempt = 1; ; attempt++) {
-    const result = runHerdrNoOutput(args);
-    if (result.ok) return result;
+    const result = runCommand("herdr", args);
+    if (result.ok) return ok(undefined);
     if (result.error.code !== "agent_pane_busy" || attempt >= attempts)
       return result;
-    await sleep(delayMs);
+    await sleep(500);
   }
-}
+};
 
-function createWorktree(
-  repoRoot: string,
-  branch: string,
-  label: string,
-): Result<{ paneId: string; worktreePath: string }> {
-  const r = runHerdr([
-    "worktree",
-    "create",
-    "--cwd",
-    repoRoot,
-    "--branch",
-    branch,
-    "--label",
-    label,
-    "--no-focus",
-  ]);
-  if (!r.ok) return fail(r.error);
-  const rootPane = (r.value as { root_pane: { pane_id: string; cwd: string } })
-    .root_pane;
-  return ok({ paneId: rootPane.pane_id, worktreePath: rootPane.cwd });
-}
-
-// Forward Foreman's provider/model so Workers don't fall back to defaults
-// that may diverge or point at a stale key (caused mid-task auth exits).
-// `pane run` accepts one shell command, so quote every argv value. Keep the
-// prompt in @file: it is lossless and avoids embedding arbitrary multiline
-// task text in that command.
 const shellQuote = (value: string): string =>
   `'${value.replaceAll("'", `'"'"'`)}'`;
 
-function workerLaunchArgs(
-  displayName: string,
-  paneId: string,
-  promptFile: string,
-): string[] {
-  const piArgs: string[] = [
-    "pi",
-    "-e",
-    workerExtensionPath(),
-    "--name",
-    `Worker: ${displayName}`,
-  ];
-  if (process.env.PI_PROVIDER)
-    piArgs.push("--provider", process.env.PI_PROVIDER);
-  if (process.env.PI_MODEL) piArgs.push("--model", process.env.PI_MODEL);
-  piArgs.push(`@${promptFile}`);
-  return ["pane", "run", paneId, piArgs.map(shellQuote).join(" ")];
-}
+const extensionPath = (name: "worker" | "verifier"): string =>
+  join(dirname(fileURLToPath(import.meta.url)), `${name}.ts`);
 
-function writePromptFile(id: string, prompt: string): string {
-  const path = join(homedir(), ".foreman", "prompts", `${id}.txt`);
+const writePromptFile = (name: string, prompt: string): string => {
+  const path = join(homedir(), ".foreman", "prompts", `${name}.txt`);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, prompt);
   return path;
-}
+};
 
-async function startWorkerAgent(
-  name: string,
-  displayName: string,
-  paneId: string,
-  prompt: string,
-): Promise<Result<{ sessionPath: string | undefined }>> {
-  const promptFile = writePromptFile(name, prompt);
-  const launched = await runHerdrNoOutputRetryingPaneBusy(
-    workerLaunchArgs(displayName, paneId, promptFile),
-  );
-  return launched.ok ? ok({ sessionPath: undefined }) : fail(launched.error);
-}
+const piCommand = (
+  role: "worker" | "verifier",
+  record: Pick<TaskRecord, "id" | "name" | "provider" | "model">,
+  promptFile: string,
+): string => {
+  const args = [
+    "pi",
+    "-e",
+    extensionPath(role),
+    "--name",
+    `${role === "worker" ? "Worker" : "Verifier"}: ${record.name}`,
+  ];
+  if (record.provider) args.push("--provider", record.provider);
+  if (record.model) args.push("--model", record.model);
+  args.push(`@${promptFile}`);
+  return `FOREMAN_TASK_ID=${shellQuote(record.id)} ${args.map(shellQuote).join(" ")}`;
+};
 
-// `esc` interrupts the current turn; the pane/worktree stay for resuming.
-// Pane id is durable in task state, unlike herdr's transient agent name.
-function haltWorkerAgent(paneId: string): Result<void> {
-  const r = runHerdr(["agent", "send-keys", paneId, "esc"]);
-  return r.ok ? ok(undefined) : fail(r.error);
-}
-
-// Foreman's flag-to-human: a native OS notification so attention is caught
-// even when the human isn't watching the terminal. Foreman is the only role
-// that talks to the human directly (vision.md), so only it gets this.
-function sendOsNotification(
-  message: string,
-): { ok: true } | { ok: false; reason: string } {
-  const platform = process.platform;
-  try {
-    if (platform === "darwin") {
-      const escaped = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-      execFileSync("osascript", [
-        "-e",
-        `display notification "${escaped}" with title "Foreman" sound name "Glass"`,
-      ]);
-      return { ok: true };
-    }
-    if (platform === "linux") {
-      execFileSync("notify-send", ["Foreman", message]);
-      return { ok: true };
-    }
-    return { ok: false, reason: `no notifier for platform ${platform}` };
-  } catch (error) {
-    return { ok: false, reason: String(error) };
-  }
-}
-
-function writeTaskRecord(record: TaskRecord): void {
-  const dir = taskStateDir(record.id);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    taskMetaPath(record.id),
-    `${JSON.stringify(record, null, 2)}\n`,
-  );
-}
-
-// Cross-repo, keyed by pane id: the task-events plugin gets only a pane_id
-// from pane.agent_status_changed, with no notion of repo.
-function registryPath(): string {
-  return join(homedir(), ".foreman", "registry.json");
-}
-
-function readRegistry(): Record<string, TaskRecord> {
-  return readJsonOptional<Record<string, TaskRecord>>(registryPath()) ?? {};
-}
-
-function writeRegistryEntry(record: TaskRecord): void {
-  const path = registryPath();
+const createDetachedWorktree = (
+  cwd: string,
+  id: string,
+  revision: string,
+): Result<TaskPlacement> => {
+  const root = runCommand("git", ["-C", cwd, "rev-parse", "--show-toplevel"]);
+  if (!root.ok)
+    return fail(
+      `git-worktree placement requires a Git repository: ${root.error.message}`,
+    );
+  const path = join(homedir(), ".foreman", "worktrees", id);
   mkdirSync(dirname(path), { recursive: true });
-  const registry = readRegistry();
-  registry[record.paneId] = record;
-  writeFileSync(path, `${JSON.stringify(registry, null, 2)}\n`);
-}
+  const added = runCommand("git", [
+    "-C",
+    root.value,
+    "worktree",
+    "add",
+    "--detach",
+    path,
+    revision,
+  ]);
+  return added.ok
+    ? ok({ kind: "git-worktree", path, repoRoot: root.value, revision })
+    : fail(added.error.message, added.error.code);
+};
 
-// --- the tool -------------------------------------------------------------
+const removeDetachedWorktree = (placement: TaskPlacement): void => {
+  if (placement.kind !== "git-worktree") return;
+  runCommand("git", [
+    "-C",
+    placement.repoRoot,
+    "worktree",
+    "remove",
+    "--force",
+    placement.path,
+  ]);
+};
+
+const createTaskTab = (
+  workspaceId: string,
+  cwd: string,
+  id: string,
+): Result<{ tabId: string; paneId: string }> => {
+  const created = runJsonCommand("herdr", [
+    "tab",
+    "create",
+    "--workspace",
+    workspaceId,
+    "--cwd",
+    cwd,
+    "--label",
+    id,
+    "--env",
+    `FOREMAN_TASK_ID=${id}`,
+    "--no-focus",
+  ]);
+  if (!created.ok) return created;
+  const value = created.value as {
+    tab?: { tab_id?: string };
+    root_pane?: { pane_id?: string; tab_id?: string };
+    pane?: { pane_id?: string; tab_id?: string };
+  };
+  const pane = value.root_pane ?? value.pane;
+  const paneId = pane?.pane_id;
+  const tabId = value.tab?.tab_id ?? pane?.tab_id;
+  return paneId && tabId
+    ? ok({ paneId, tabId })
+    : fail(
+        `herdr tab create returned no tab/pane id: ${JSON.stringify(value)}`,
+      );
+};
+
+const startWorker = async (record: TaskRecord): Promise<Result<void>> => {
+  const promptFile = writePromptFile(record.id, record.prompt);
+  return runHerdrNoOutputRetryingPaneBusy([
+    "pane",
+    "run",
+    record.workerPaneId,
+    piCommand("worker", record, promptFile),
+  ]);
+};
+
+const verifierPrompt = (record: TaskRecord, context: string): string =>
+  [
+    `Task ${record.id}.`,
+    `Original request: ${record.prompt}`,
+    `Foreman verification request: ${context}`,
+    "",
+    "Independently verify the identified artifact, claim, or result against the request. Inspect the relevant evidence and run appropriate checks. Do not implement fixes. Record detailed findings on the artifact's natural durable surface when one exists; otherwise include them in your verdict context. Then call verifier_signal with approve, deny, or flag.",
+  ].join("\n");
+
+const startVerifier = async (
+  record: TaskRecord,
+  context: string,
+): Promise<Result<{ paneId: string; reused: boolean }>> => {
+  if (record.verifierPaneId) {
+    queueInboxMessage(record.verifierPaneId, {
+      customType: "foreman-verifier-directive",
+      content: `New verification request for task ${record.id}:\n${context}`,
+      details: { taskId: record.id, context },
+      triggerTurn: true,
+      deliverAs: "steer",
+    });
+    return ok({ paneId: record.verifierPaneId, reused: true });
+  }
+
+  const split = runJsonCommand("herdr", [
+    "pane",
+    "split",
+    record.workerPaneId,
+    "--direction",
+    "down",
+    "--cwd",
+    record.cwd,
+    "--no-focus",
+  ]);
+  if (!split.ok) return split;
+  const paneId = (split.value as { pane?: { pane_id?: string } }).pane?.pane_id;
+  if (!paneId)
+    return fail(
+      `herdr pane split returned no pane id: ${JSON.stringify(split.value)}`,
+    );
+
+  const promptFile = writePromptFile(
+    `${record.id}-verifier`,
+    verifierPrompt(record, context),
+  );
+  const launched = await runHerdrNoOutputRetryingPaneBusy([
+    "pane",
+    "run",
+    paneId,
+    piCommand("verifier", record, promptFile),
+  ]);
+  if (!launched.ok) return launched;
+
+  record.verifierPaneId = paneId;
+  writeTaskRecord(record);
+  writePaneRegistration(record, record.workerPaneId, "worker");
+  writePaneRegistration(record, paneId, "verifier");
+  return ok({ paneId, reused: false });
+};
+
+const haltWorker = (paneId: string): Result<void> => {
+  const result = runJsonCommand("herdr", ["agent", "send-keys", paneId, "esc"]);
+  return result.ok ? ok(undefined) : result;
+};
+
+const sendOsNotification = (message: string): Result<void> => {
+  if (process.platform === "darwin") {
+    const escaped = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const sent = runCommand("osascript", [
+      "-e",
+      `display notification "${escaped}" with title "Foreman" sound name "Glass"`,
+    ]);
+    return sent.ok ? ok(undefined) : sent;
+  }
+  if (process.platform === "linux") {
+    const sent = runCommand("notify-send", ["Foreman", message]);
+    return sent.ok ? ok(undefined) : sent;
+  }
+  return fail(`no notifier for platform ${process.platform}`);
+};
+
+const toolResult = (text: string, details?: unknown, isError?: boolean) => ({
+  content: [{ type: "text" as const, text }],
+  details,
+  isError,
+});
 
 const createTaskTool = defineTool({
   name: "create_task",
   label: "Create Task",
   description:
-    "Start a new Task Thread: a git worktree plus a Worker agent running in it, in its own herdr pane. Use this to delegate work rather than doing it yourself.",
-  promptSnippet: "Spawn a Worker in a fresh worktree/pane for a new task",
+    "Create a Task Thread as a tab in the Foreman workspace and start its Worker. Explicitly choose the shared current directory or a detached Git worktree; the Worker owns any branch or PR decision.",
+  promptSnippet: "Create a Worker Task Thread with intentional placement",
   parameters: Type.Object({
-    name: Type.String({
-      description: "Short human-readable task name, used to derive the task id",
-    }),
-    prompt: Type.String({
-      description: "The task description/instructions to hand to the Worker",
-    }),
+    name: Type.String({ description: "Short human-readable task name" }),
+    prompt: Type.String({ description: "Task instructions for the Worker" }),
+    placement: Type.Union([
+      Type.Object({ kind: Type.Literal("shared") }),
+      Type.Object({
+        kind: Type.Literal("git-worktree"),
+        revision: Type.Optional(
+          Type.String({
+            description: "Commit-ish to detach at; defaults to HEAD",
+          }),
+        ),
+      }),
+    ]),
   }),
-
   async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-    const repoRoot = ctx.cwd;
+    const workspaceId = process.env.HERDR_WORKSPACE_ID;
+    if (!workspaceId)
+      return toolResult(
+        "create_task requires Foreman to run inside a Herdr workspace (HERDR_WORKSPACE_ID is missing).",
+        undefined,
+        true,
+      );
+
     const id = taskId(params.name, Date.now().toString(36));
-    const branch = branchFor(id);
+    const placement =
+      params.placement.kind === "shared"
+        ? ok<TaskPlacement>({ kind: "shared", path: ctx.cwd })
+        : createDetachedWorktree(
+            ctx.cwd,
+            id,
+            params.placement.revision ?? "HEAD",
+          );
+    if (!placement.ok)
+      return toolResult(
+        `Failed to prepare ${params.placement.kind} placement: ${placement.error.message}`,
+        undefined,
+        true,
+      );
 
-    const wt = createWorktree(repoRoot, branch, id);
-    if (!wt.ok) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to create worktree: ${wt.error.message}`,
-          },
-        ],
-        details: undefined,
-        isError: true,
-      };
+    const tab = createTaskTab(workspaceId, placement.value.path, id);
+    if (!tab.ok) {
+      removeDetachedWorktree(placement.value);
+      return toolResult(
+        `Failed to create Task Thread tab: ${tab.error.message}`,
+        undefined,
+        true,
+      );
     }
-    const { paneId, worktreePath } = wt.value;
 
-    // Register before submitting the launch so early integration events map to
-    // the task and a launch failure still leaves an explicit tracked record.
-    const record: WorkerRecord = {
+    const record: TaskRecord = {
       id,
       name: params.name,
-      repoRoot,
-      worktreePath,
-      branch,
-      paneId,
-      role: "worker",
       prompt: params.prompt,
+      cwd: placement.value.path,
+      placement: placement.value,
+      workspaceId,
+      tabId: tab.value.tabId,
+      workerPaneId: tab.value.paneId,
+      foremanPaneId: process.env.HERDR_PANE_ID,
       provider: process.env.PI_PROVIDER,
       model: process.env.PI_MODEL,
-      foremanPaneId: process.env.HERDR_PANE_ID,
-      sessionPath: undefined,
       createdAt: Date.now(),
     };
     writeTaskRecord(record);
-    writeRegistryEntry(record);
+    writePaneRegistration(record, record.workerPaneId, "worker");
 
-    const started = await startWorkerAgent(
-      id,
-      params.name,
-      paneId,
-      params.prompt,
+    const started = await startWorker(record);
+    if (!started.ok)
+      return toolResult(
+        `Task ${id} is tracked in tab ${record.tabId}, but Worker launch failed: ${started.error.message}`,
+        record,
+        true,
+      );
+
+    return toolResult(
+      `Created task ${id} in tab ${record.tabId}, pane ${record.workerPaneId}, using ${record.placement.kind} placement at ${record.cwd}.`,
+      record,
     );
-    if (!started.ok) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Task ${id} registered (pane ${paneId}, worktree ${worktreePath}) but Worker failed to start: ${started.error.message}. The task is tracked — halt or clean it up via the registry.`,
-          },
-        ],
-        details: record,
-        isError: true,
-      };
-    }
-    if (started.value.sessionPath) {
-      record.sessionPath = started.value.sessionPath;
-      writeTaskRecord(record);
-      writeRegistryEntry(record);
-    }
+  },
+});
 
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Created task ${id} in pane ${paneId}, worktree ${worktreePath}. The Worker is starting; you'll get a pushed signal when it reports planned/done/flag. Attach with: herdr agent attach ${paneId}`,
-        },
-      ],
-      details: record,
-    };
+const messageWorkerTool = defineTool({
+  name: "message_worker",
+  label: "Message Worker",
+  description:
+    "Send contextual input or a new instruction to an existing task's Worker through its structured inbox. This does not imply a lifecycle transition.",
+  promptSnippet: "Send a safe contextual message to a Worker",
+  parameters: Type.Object({
+    id: Type.String({ description: "Task id returned by create_task" }),
+    context: Type.String({
+      description: "Instruction or context for the Worker",
+    }),
+  }),
+  async execute(_toolCallId, params) {
+    const record = readTaskRecord(params.id);
+    if (!record)
+      return toolResult(`No task found with id ${params.id}`, undefined, true);
+    const message = queueInboxMessage(record.workerPaneId, {
+      customType: "foreman-worker-directive",
+      content: `Foreman message for task ${record.id}:\n${params.context}`,
+      details: { taskId: record.id, context: params.context },
+      triggerTurn: true,
+      deliverAs: "steer",
+    });
+    return toolResult(
+      `Queued message ${message.id} for task ${record.id}'s Worker.`,
+      { task: record, message },
+    );
+  },
+});
+
+const startVerifierTool = defineTool({
+  name: "start_verifier",
+  label: "Start or Reuse Verifier",
+  description:
+    "Contextually request independent verification of any artifact, claim, or result. Starts a persistent Verifier in the task tab or reuses the existing one.",
+  promptSnippet: "Choose and describe independent verification",
+  parameters: Type.Object({
+    id: Type.String({ description: "Task id returned by create_task" }),
+    context: Type.String({
+      description:
+        "What should be verified, where its evidence lives, and what correctness means here",
+    }),
+  }),
+  async execute(_toolCallId, params) {
+    const record = readTaskRecord(params.id);
+    if (!record)
+      return toolResult(`No task found with id ${params.id}`, undefined, true);
+    const started = await startVerifier(record, params.context);
+    if (!started.ok)
+      return toolResult(
+        `Failed to start or message Verifier: ${started.error.message}`,
+        undefined,
+        true,
+      );
+    return toolResult(
+      `${started.value.reused ? "Messaged existing" : "Started"} Verifier for task ${params.id} in pane ${started.value.paneId}.`,
+      { task: record, ...started.value },
+    );
   },
 });
 
@@ -439,50 +532,23 @@ const haltWorkerTool = defineTool({
   name: "halt_worker",
   label: "Halt Worker",
   description:
-    "Interrupt an in-progress Worker's current turn (sends Escape to its pane). The worktree and pane are left intact — this does not end the task, just stops what the Worker is doing right now.",
-  promptSnippet: "Send Escape to a task's Worker to interrupt its current turn",
+    "Interrupt a Worker's current turn with Escape. The Task Thread and session remain available.",
+  promptSnippet: "Interrupt a Worker's current turn",
   parameters: Type.Object({
-    id: Type.String({ description: "Task id, as returned by create_task" }),
+    id: Type.String({ description: "Task id returned by create_task" }),
   }),
-
-  async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+  async execute(_toolCallId, params) {
     const record = readTaskRecord(params.id);
-    if (!record) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `No task found with id ${params.id} (looked in ${taskStateDir(params.id)})`,
-          },
-        ],
-        details: undefined,
-        isError: true,
-      };
-    }
-
-    const halted = haltWorkerAgent(record.paneId);
-    if (!halted.ok) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to halt Worker for task ${params.id}: ${halted.error.message}`,
-          },
-        ],
-        details: undefined,
-        isError: true,
-      };
-    }
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Sent halt (Escape) to task ${params.id}'s Worker (pane ${record.paneId}).`,
-        },
-      ],
-      details: record,
-    };
+    if (!record)
+      return toolResult(`No task found with id ${params.id}`, undefined, true);
+    const halted = haltWorker(record.workerPaneId);
+    return halted.ok
+      ? toolResult(`Sent halt to task ${params.id}'s Worker.`, record)
+      : toolResult(
+          `Failed to halt task ${params.id}: ${halted.error.message}`,
+          undefined,
+          true,
+        );
   },
 });
 
@@ -490,44 +556,35 @@ const flagTool = defineTool({
   name: "flag",
   label: "Flag to Human",
   description:
-    "Send a native OS notification to the human when something demands their attention (a Worker/Verifier flag you couldn't resolve, or any decision only the human can make). Use sparingly — this interrupts them.",
-  promptSnippet: "Send an OS notification to the human",
+    "Send a native OS notification when contextual judgment says the human's attention is required. Use sparingly.",
+  promptSnippet: "Notify the human about a decision or risk",
   parameters: Type.Object({
-    context: Type.String({
-      description:
-        "What demands the human's attention and what you need from them",
-    }),
+    context: Type.String({ description: "What needs human attention and why" }),
   }),
-
   async execute(_toolCallId, params) {
-    const result = sendOsNotification(params.context);
-    const delivered = result.ok;
-    const reason = result.ok ? undefined : result.reason;
-    return {
-      content: [
-        delivered
-          ? { type: "text", text: `Notified the human: ${params.context}` }
-          : {
-              type: "text",
-              text: `OS notification not delivered (${reason}). Flag context: ${params.context}`,
-            },
-      ],
-      details: { context: params.context, delivered, reason },
-      isError: delivered ? undefined : true,
-    };
+    const sent = sendOsNotification(params.context);
+    return sent.ok
+      ? toolResult(`Notified the human: ${params.context}`, {
+          context: params.context,
+          delivered: true,
+        })
+      : toolResult(
+          `OS notification not delivered (${sent.error.message}). Flag context: ${params.context}`,
+          { context: params.context, delivered: false },
+          true,
+        );
   },
 });
 
-// Core role directives, always-on via system-prompt injection (roles/foreman.md)
-// — not a skill, to avoid the progressive-disclosure read gate. The full
-// reference (task model, on-disk state, herdr commands, compaction recovery)
-// lives in skills/foreman/SKILL.md, loaded on demand.
 const FOREMAN_ROLE_PROMPT = readRole("foreman");
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool(createTaskTool);
+  pi.registerTool(messageWorkerTool);
+  pi.registerTool(startVerifierTool);
   pi.registerTool(haltWorkerTool);
   pi.registerTool(flagTool);
+  registerInbox(pi, process.env.HERDR_PANE_ID);
 
   pi.on("before_agent_start", (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${FOREMAN_ROLE_PROMPT}`,
