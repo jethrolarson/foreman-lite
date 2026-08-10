@@ -1,64 +1,60 @@
 # Foreman-lite
 
-Talk to one orchestrator agent (Foreman); it delegates work to Worker agents and
-makes sure a Verifier reviews each result — so you stay out of the plate-spinning
-and review loops, and no single agent's context gets bloated holding it all.
+Talk to one orchestrator agent (**Foreman**) while persistent **Workers** handle Task Threads and optional **Verifiers** independently check results. Code supplies sessions, isolation, and durable message delivery; Foreman decides contextually what happens next.
 
-Built on [herdr](https://herdr.dev) for panes/worktrees and
-[pi](https://github.com/earendil-works/pi-coding-agent) for the agents. State
-transitions are **pushed** to Foreman automatically — it doesn't poll, so you see
-"task done / approved / blocked" arrive on their own.
+Built on [Herdr](https://herdr.dev) for visible task tabs and [Pi](https://github.com/earendil-works/pi-coding-agent) for agents. State transitions are pushed to Foreman without polling or typing into the human's editor.
 
 ## How it works
 
-You talk to **Foreman**. It creates **Task Threads**: a git worktree + a **Worker**
-agent doing the work + a **Verifier** agent reviewing the Worker's actual changes
-(same worktree). Each role ends every turn with a signal:
+One Foreman Herdr workspace contains one tab per Task Thread. A task tab has a Worker pane and, when Foreman chooses independent checking, a persistent Verifier pane.
 
-- Worker: `planned` · `done` · `flag`
-- Verifier: `approve` · `deny` · `flag`
+When creating a task, Foreman explicitly chooses:
 
-A herdr plugin watches every pane and routes signals automatically. `done`
-requires the Worker to push its branch and open a PR, then spawns/prompts the
-Verifier. The Verifier leaves a visibly marked review comment on that PR; a
-`deny` sends the Worker back to those comments. All signals also land in
-Foreman's conversation, where Foreman decides contextually whether they need
-your attention. Merge authority stays with you.
+- **shared** — use Foreman's current directory, including non-Git work;
+- **git-worktree** — create a detached worktree for isolation while leaving branch and PR decisions to Worker.
 
-## Setup (once per machine)
+Each role reports facts through signals:
+
+- Worker: `planned(context)` · `done(context)` · `flag(context)`
+- Verifier: `approve(context)` · `deny(context)` · `flag(context)`
+
+`done(context)` may identify prose, a report, spec, path, commit, PR, or another artifact. Signals do not automatically spawn review or remediation. Foreman may message the existing Worker, start or reuse a Verifier with a contextual review request, alert the human, or take no action.
+
+A Herdr plugin observes pane transitions and writes atomic messages to per-pane inboxes under `~/.foreman`. Role extensions deliver those messages with Pi's `sendMessage()` API. This keeps unfinished human editor drafts separate from machine events.
+
+## Setup
 
 ```sh
 brew install herdr
-herdr integration install pi            # reports pi's working/idle/blocked to herdr
+herdr integration install pi
 herdr plugin link /path/to/foreman-lite/plugins/task-events
 ```
 
 ## Run
 
-`bin/foreman` resolves its own paths, so run it from your project's repo root,
-inside a herdr pane (extra args pass through to pi):
+Start Foreman from the directory whose context tasks should share or isolate, inside a Herdr pane:
 
 ```sh
-foreman-lite/bin/foreman            # or add bin/ to PATH / alias it
+foreman-lite/bin/foreman
 ```
 
-Then just ask Foreman to do things — "add a feature X", "fix the bug in Y". It
-spawns workers, tracks them, and tells you when work is verified and ready to
-merge. Drill into any thread directly with `herdr agent attach <name>`.
+Ask Foreman to create work, research, reviews, or other Task Threads. Attach directly to any live role session with:
+
+```sh
+herdr agent attach <pane-id>
+```
 
 ## Project layout
 
-```
-extensions/   foreman.ts, worker.ts, verifier.ts — each role's tools + injected role
-roles/        *.md role definitions (injected as system prompt, not skills)
-skills/foreman/SKILL.md   Foreman's on-demand operational reference
-plugins/task-events/      herdr plugin: routes signals, spawns the Verifier
-docs/        vision.md (the what/why), handoff.md (current state + how to verify)
+```text
+extensions/                  role tools, task provisioning, structured inbox
+roles/                       always-on Foreman/Worker/Verifier directives
+skills/foreman/SKILL.md      on-demand operational and recovery reference
+plugins/task-events/         signal observation and inbox delivery
+docs/vision.md               user-owned source of truth
+docs/plans/                  active implementation plans
 ```
 
 ## Status
 
-Functionally complete per `docs/vision.md`. Workers open PRs, Verifiers keep a
-durable marked review record in PR comments, Foreman decides contextually which
-signals warrant human attention, and merge authority stays with the human. See
-`docs/handoff.md` for what's verified and the known rough edges.
+The Foreman-judgment redesign is implemented and live-validated across shared non-Git tasks, detached-worktree tasks, arbitrary completion context, Worker/Verifier reuse, halt behavior, deduplicated delivery, and preservation of unsent editor drafts. See `docs/plans/foreman-judgment-redesign.md` for the evidence record.

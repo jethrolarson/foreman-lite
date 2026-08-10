@@ -1,14 +1,13 @@
 /**
  * Verifier extension: the lifecycle-signal tool for a Task Thread's Verifier.
  *
- * Loaded only for Verifier panes — the task-events plugin spawns these in
- * the Worker's own worktree (not a new one) so the Verifier sees the real
- * changes. Like worker.ts, every turn must end with a signal so a Verifier
- * can't go silently idle mid-review.
+ * Loaded only for Verifier panes. Foreman starts one in the Task Thread's
+ * directory and identifies the artifact or claim to verify. Like worker.ts,
+ * every turn must end with a signal so a Verifier cannot go silently idle.
  *
  * Shares `~/.foreman/tasks/<id>/events.jsonl` with the Worker; events are
  * stamped `role: "verifier"` so the task-events plugin can route them back
- * to Foreman / the Worker rather than re-triggering a Verifier spawn.
+ * to Foreman; Foreman decides whether any next action is appropriate.
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -18,8 +17,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
-import { taskIdFromCwd, taskEventsPath } from "./taskState.js";
+import { taskEventsPath, taskIdFromEnvironment } from "./taskState.js";
 
 type VerifierAction = "approve" | "deny" | "flag";
 
@@ -30,7 +30,7 @@ const MAX_NAGS_PER_RUN = 3;
 // turn 1 — not a skill, to avoid the progressive-disclosure read gate.
 const VERIFIER_ROLE_PROMPT = readRole("verifier");
 
-function calledVerifierSignal(messages: AgentMessage[]): boolean {
+export const calledVerifierSignal = (messages: AgentMessage[]): boolean => {
   return messages.some(
     (m) =>
       m.role === "assistant" &&
@@ -38,24 +38,26 @@ function calledVerifierSignal(messages: AgentMessage[]): boolean {
         (c) => c.type === "toolCall" && c.name === SIGNAL_TOOL_NAME,
       ),
   );
-}
+};
 
-function endedWithModelError(messages: AgentMessage[]): boolean {
+export const verifierEndedWithModelFailure = (
+  messages: AgentMessage[],
+): boolean => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message) continue;
     if (message.role === "assistant" && "stopReason" in message)
-      return message.stopReason === "error";
+      return message.stopReason === "error" || message.stopReason === "aborted";
   }
   return false;
-}
+};
 
 function appendTaskEvent(
-  worktreeRoot: string,
+  taskId: string,
   action: VerifierAction,
   context: string,
 ): void {
-  const path = taskEventsPath(taskIdFromCwd(worktreeRoot));
+  const path = taskEventsPath(taskId);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(
     path,
@@ -68,33 +70,32 @@ function describeAction(action: VerifierAction, context: string): string {
     case "approve":
       return `Approved: ${context}`;
     case "deny":
-      return `Denied, sent back to Worker: ${context}`;
+      return `Denied, reported to Foreman: ${context}`;
     case "flag":
       return `Concern raised to Foreman: ${context}`;
   }
 }
 
-function buildVerifierSignalTool(pi: ExtensionAPI) {
+export const buildVerifierSignalTool = (pi: ExtensionAPI, taskId: string) => {
   return defineTool({
     name: SIGNAL_TOOL_NAME,
     label: "Verifier Signal",
     description:
-      "Emit a verdict after posting a marked GitHub PR review comment: `approve` (work accepted), `deny` (detailed feedback posted for Worker), or `flag` (raise a concern to Foreman). Keep context to a short summary; the durable review lives on the PR.",
+      "Emit a verification verdict: `approve` (the identified claim or artifact checks out), `deny` (specific problems found), or `flag` (verification is blocked or raises a broader concern). Put enough context in the signal for Foreman to judge the next step.",
     promptSnippet: "Emit a Verifier verdict (approve/deny/flag)",
     promptGuidelines: [
-      "Only approve work you actually checked. Before signaling, post the detailed review on the PR with the foreman-lite Verifier marker.",
+      "Only approve what you actually checked. Record detailed findings on the artifact's natural durable surface when one exists; otherwise include them in context.",
     ],
     parameters: Type.Object({
       action: StringEnum(["approve", "deny", "flag"] as const),
       context: Type.String({
         description:
-          "Short verdict summary. Detailed review belongs in the marked GitHub PR comment.",
+          "What was checked, the verdict, and where any detailed findings live",
       }),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const worktreeRoot = ctx.cwd;
-      appendTaskEvent(worktreeRoot, params.action, params.context);
+    async execute(_toolCallId, params) {
+      appendTaskEvent(taskId, params.action, params.context);
 
       pi.events.emit("herdr:blocked", {
         active: params.action === "flag",
@@ -110,11 +111,12 @@ function buildVerifierSignalTool(pi: ExtensionAPI) {
       };
     },
   });
-}
+};
 
 export default function (pi: ExtensionAPI) {
-  pi.registerTool(buildVerifierSignalTool(pi));
-  const taskId = taskIdFromCwd(process.cwd());
+  const taskId = taskIdFromEnvironment();
+  pi.registerTool(buildVerifierSignalTool(pi, taskId));
+  registerInbox(pi, process.env.HERDR_PANE_ID);
 
   pi.on("before_agent_start", (event) => ({
     systemPrompt: `${event.systemPrompt}\n\nYour foreman-lite task id is \`${taskId}\`.\n\n${VERIFIER_ROLE_PROMPT}`,
@@ -129,10 +131,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", (event) => {
     if (
       calledVerifierSignal(event.messages) ||
-      endedWithModelError(event.messages)
+      verifierEndedWithModelFailure(event.messages)
     ) {
-      // Provider/model errors aren't behavioral omissions; corrective turns
-      // only repeat a request that cannot currently succeed.
+      // Provider/model errors and explicit halts aren't behavioral omissions;
+      // corrective turns only repeat a failed or intentionally aborted request.
       nagCount = 0;
       return;
     }
