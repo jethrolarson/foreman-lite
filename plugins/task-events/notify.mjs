@@ -1,21 +1,21 @@
-// Herdr event hook: routes Worker and Verifier lifecycle signals to the
-// Foreman's structured inbox. It reports facts only; Foreman decides whether
-// to continue, verify, remediate, escalate, or do nothing.
-
+// Herdr process adapter. Decision logic lives in notify-core.mjs so importing it
+// never exits a process or invokes Herdr.
 import {
-  existsSync,
   linkSync,
   mkdirSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-
-const REACTABLE_STATUSES = new Set(["idle", "blocked", "done"]);
+import {
+  REACTABLE_STATUSES,
+  buildNotification,
+  latestRoleEvent,
+} from "./notify-core.mjs";
 
 const readJsonEnv = (name) => {
   const raw = process.env[name];
@@ -27,8 +27,6 @@ const readJsonEnv = (name) => {
   }
 };
 
-const registryPath = () => join(homedir(), ".foreman", "registry.json");
-
 const readJsonOptional = (path) => {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -38,29 +36,31 @@ const readJsonOptional = (path) => {
   }
 };
 
-const readRegistry = () => readJsonOptional(registryPath()) ?? {};
+const stateRoot = join(homedir(), ".foreman");
+const readRegistry = () =>
+  readJsonOptional(join(stateRoot, "registry.json")) ?? {};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const findTaskWithRetry = async (paneId, attempts = 5, delayMs = 200) => {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const task = readRegistry()[paneId];
+    if (task) return task;
+    if (attempt < attempts) await sleep(delayMs);
+  }
+  return undefined;
+};
 
 const lastTaskEvent = (taskId, role) => {
-  let raw;
   try {
-    raw = readFileSync(
-      join(homedir(), ".foreman", "tasks", taskId, "events.jsonl"),
-      "utf8",
+    return latestRoleEvent(
+      readFileSync(join(stateRoot, "tasks", taskId, "events.jsonl"), "utf8"),
+      role,
     );
   } catch (error) {
     if (error.code === "ENOENT") return undefined;
     throw error;
   }
-  return raw
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .reverse()
-    .map((line) => JSON.parse(line))
-    .find((event) => event.role === role);
 };
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const agentStatus = (paneId) => {
   const result = spawnSync(
@@ -76,28 +76,14 @@ const agentStatus = (paneId) => {
   }
 };
 
-const findTaskWithRetry = async (paneId, attempts = 5, delayMs = 200) => {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const task = readRegistry()[paneId];
-    if (task) return task;
-    if (attempt < attempts) await sleep(delayMs);
-  }
-  return undefined;
-};
-
-const dedupeKey = (task, event) =>
-  `${task.id}:${event?.role ?? task.role}:${event?.timestamp ?? "none"}`;
-
-const messageId = (key) =>
-  createHash("sha256").update(key).digest("hex").slice(0, 32);
-
-const inboxRoot = (paneId) =>
-  join(homedir(), ".foreman", "inboxes", encodeURIComponent(paneId));
-
 const queueMessage = (paneId, message) => {
-  const path = join(inboxRoot(paneId), "messages", `${message.id}.json`);
-  if (existsSync(path)) return;
-
+  const path = join(
+    stateRoot,
+    "inboxes",
+    encodeURIComponent(paneId),
+    "messages",
+    `${message.id}.json`,
+  );
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(message, null, 2)}\n`, {
@@ -113,49 +99,27 @@ const queueMessage = (paneId, message) => {
 };
 
 const event = readJsonEnv("HERDR_PLUGIN_EVENT_JSON");
-const data = event?.data;
-const status = data?.agent_status;
-const paneId = data?.pane_id;
-
-if (!status || !paneId || !REACTABLE_STATUSES.has(status)) process.exit(0);
-
-const task = await findTaskWithRetry(paneId);
-if (!task) process.exit(0);
-
-const taskEvent = lastTaskEvent(task.id, task.role);
-
-// Going idle without a signal may be the extension's bounded reminder turn.
-// Wait briefly and suppress the transient idle/working flicker.
-if (task.role === "worker" && !taskEvent && status === "idle") {
-  await sleep(3_000);
-  const current = agentStatus(paneId);
-  if (current && current !== "idle") process.exit(0);
+const status = event?.data?.agent_status;
+const paneId = event?.data?.pane_id;
+if (status && paneId && REACTABLE_STATUSES.has(status)) {
+  const task = await findTaskWithRetry(paneId);
+  if (task) {
+    const taskEvent = lastTaskEvent(task.id, task.role);
+    let transientIdle = false;
+    if (task.role === "worker" && !taskEvent && status === "idle") {
+      await sleep(3_000);
+      const current = agentStatus(paneId);
+      transientIdle = Boolean(current && current !== "idle");
+    }
+    if (!transientIdle) {
+      const notification = buildNotification({
+        task,
+        paneId,
+        paneStatus: status,
+        taskEvent,
+        now: Date.now,
+      });
+      if (notification) queueMessage(notification.paneId, notification.message);
+    }
+  }
 }
-
-if (!task.foremanPaneId) process.exit(0);
-
-const source = task.role === "verifier" ? "verifier" : "worker";
-const action = taskEvent?.action ?? "none";
-const context =
-  taskEvent?.context ?? `Agent became ${status} without a signal.`;
-const details = {
-  source,
-  taskId: task.id,
-  paneId,
-  paneStatus: status,
-  action,
-  context,
-  eventTimestamp: taskEvent?.timestamp,
-};
-const label = source === "verifier" ? "Verifier verdict" : "Worker signal";
-const message = {
-  id: messageId(dedupeKey(task, taskEvent)),
-  customType: "foreman-task-signal",
-  content: `${label} for task ${task.id}: ${action}\n${context}`,
-  details,
-  createdAt: taskEvent?.timestamp ?? Date.now(),
-  triggerTurn: true,
-  deliverAs: "steer",
-};
-
-queueMessage(task.foremanPaneId, message);

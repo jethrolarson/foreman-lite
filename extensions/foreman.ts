@@ -8,6 +8,19 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { queueInboxMessage, registerInbox } from "./inbox.js";
+import {
+  addWorktreeCommand,
+  buildPiLaunchCommand,
+  createTaskTabCommand,
+  describeTabFailure,
+  haltPaneCommand,
+  removeWorktreeCommand,
+  resolveRepositoryCommand,
+  runPaneCommand,
+  sharedPlacement,
+  splitVerifierPaneCommand,
+  verifierDisposition,
+} from "./foremanMechanics.js";
 import { readRole } from "./roles.js";
 import { taskMetaPath } from "./taskState.js";
 
@@ -179,9 +192,6 @@ const runHerdrNoOutputRetryingPaneBusy = async (
   }
 };
 
-const shellQuote = (value: string): string =>
-  `'${value.replaceAll("'", `'"'"'`)}'`;
-
 const extensionPath = (name: "worker" | "verifier"): string =>
   join(dirname(fileURLToPath(import.meta.url)), `${name}.ts`);
 
@@ -196,56 +206,34 @@ const piCommand = (
   role: "worker" | "verifier",
   record: Pick<TaskRecord, "id" | "name" | "provider" | "model">,
   promptFile: string,
-): string => {
-  const args = [
-    "pi",
-    "-e",
-    extensionPath(role),
-    "--name",
-    `${role === "worker" ? "Worker" : "Verifier"}: ${record.name}`,
-  ];
-  if (record.provider) args.push("--provider", record.provider);
-  if (record.model) args.push("--model", record.model);
-  args.push(`@${promptFile}`);
-  return `FOREMAN_TASK_ID=${shellQuote(record.id)} ${args.map(shellQuote).join(" ")}`;
-};
+): string =>
+  buildPiLaunchCommand(role, record, extensionPath(role), promptFile);
 
 const createDetachedWorktree = (
   cwd: string,
   id: string,
   revision: string,
 ): Result<TaskPlacement> => {
-  const root = runCommand("git", ["-C", cwd, "rev-parse", "--show-toplevel"]);
+  const resolved = resolveRepositoryCommand(cwd);
+  const root = runCommand(resolved.executable, resolved.args);
   if (!root.ok)
     return fail(
       `git-worktree placement requires a Git repository: ${root.error.message}`,
     );
   const path = join(homedir(), ".foreman", "worktrees", id);
   mkdirSync(dirname(path), { recursive: true });
-  const added = runCommand("git", [
-    "-C",
-    root.value,
-    "worktree",
-    "add",
-    "--detach",
-    path,
-    revision,
-  ]);
+  const command = addWorktreeCommand(root.value, path, revision);
+  const added = runCommand(command.executable, command.args);
   return added.ok
     ? ok({ kind: "git-worktree", path, repoRoot: root.value, revision })
     : fail(added.error.message, added.error.code);
 };
 
-const removeDetachedWorktree = (placement: TaskPlacement): void => {
-  if (placement.kind !== "git-worktree") return;
-  runCommand("git", [
-    "-C",
-    placement.repoRoot,
-    "worktree",
-    "remove",
-    "--force",
-    placement.path,
-  ]);
+const removeDetachedWorktree = (placement: TaskPlacement): Result<void> => {
+  if (placement.kind !== "git-worktree") return ok(undefined);
+  const command = removeWorktreeCommand(placement.repoRoot, placement.path);
+  const removed = runCommand(command.executable, command.args);
+  return removed.ok ? ok(undefined) : removed;
 };
 
 const createTaskTab = (
@@ -253,19 +241,8 @@ const createTaskTab = (
   cwd: string,
   id: string,
 ): Result<{ tabId: string; paneId: string }> => {
-  const created = runJsonCommand("herdr", [
-    "tab",
-    "create",
-    "--workspace",
-    workspaceId,
-    "--cwd",
-    cwd,
-    "--label",
-    id,
-    "--env",
-    `FOREMAN_TASK_ID=${id}`,
-    "--no-focus",
-  ]);
+  const command = createTaskTabCommand(workspaceId, cwd, id);
+  const created = runJsonCommand(command.executable, command.args);
   if (!created.ok) return created;
   const value = created.value as {
     tab?: { tab_id?: string };
@@ -284,12 +261,11 @@ const createTaskTab = (
 
 const startWorker = async (record: TaskRecord): Promise<Result<void>> => {
   const promptFile = writePromptFile(record.id, record.prompt);
-  return runHerdrNoOutputRetryingPaneBusy([
-    "pane",
-    "run",
+  const command = runPaneCommand(
     record.workerPaneId,
     piCommand("worker", record, promptFile),
-  ]);
+  );
+  return runHerdrNoOutputRetryingPaneBusy(command.args);
 };
 
 const verifierPrompt = (record: TaskRecord, context: string): string =>
@@ -305,27 +281,23 @@ const startVerifier = async (
   record: TaskRecord,
   context: string,
 ): Promise<Result<{ paneId: string; reused: boolean }>> => {
-  if (record.verifierPaneId) {
-    queueInboxMessage(record.verifierPaneId, {
+  const disposition = verifierDisposition(record.verifierPaneId);
+  if (disposition.kind === "reuse") {
+    queueInboxMessage(disposition.paneId, {
       customType: "foreman-verifier-directive",
       content: `New verification request for task ${record.id}:\n${context}`,
       details: { taskId: record.id, context },
       triggerTurn: true,
       deliverAs: "steer",
     });
-    return ok({ paneId: record.verifierPaneId, reused: true });
+    return ok({ paneId: disposition.paneId, reused: true });
   }
 
-  const split = runJsonCommand("herdr", [
-    "pane",
-    "split",
+  const splitCommand = splitVerifierPaneCommand(
     record.workerPaneId,
-    "--direction",
-    "down",
-    "--cwd",
     record.cwd,
-    "--no-focus",
-  ]);
+  );
+  const split = runJsonCommand(splitCommand.executable, splitCommand.args);
   if (!split.ok) return split;
   const paneId = (split.value as { pane?: { pane_id?: string } }).pane?.pane_id;
   if (!paneId)
@@ -337,12 +309,11 @@ const startVerifier = async (
     `${record.id}-verifier`,
     verifierPrompt(record, context),
   );
-  const launched = await runHerdrNoOutputRetryingPaneBusy([
-    "pane",
-    "run",
+  const paneRun = runPaneCommand(
     paneId,
     piCommand("verifier", record, promptFile),
-  ]);
+  );
+  const launched = await runHerdrNoOutputRetryingPaneBusy(paneRun.args);
   if (!launched.ok) return launched;
 
   record.verifierPaneId = paneId;
@@ -353,7 +324,8 @@ const startVerifier = async (
 };
 
 const haltWorker = (paneId: string): Result<void> => {
-  const result = runJsonCommand("herdr", ["agent", "send-keys", paneId, "esc"]);
+  const command = haltPaneCommand(paneId);
+  const result = runJsonCommand(command.executable, command.args);
   return result.ok ? ok(undefined) : result;
 };
 
@@ -412,7 +384,7 @@ const createTaskTool = defineTool({
     const id = taskId(params.name, Date.now().toString(36));
     const placement =
       params.placement.kind === "shared"
-        ? ok<TaskPlacement>({ kind: "shared", path: ctx.cwd })
+        ? ok<TaskPlacement>(sharedPlacement(ctx.cwd))
         : createDetachedWorktree(
             ctx.cwd,
             id,
@@ -427,9 +399,12 @@ const createTaskTool = defineTool({
 
     const tab = createTaskTab(workspaceId, placement.value.path, id);
     if (!tab.ok) {
-      removeDetachedWorktree(placement.value);
+      const rollback = removeDetachedWorktree(placement.value);
       return toolResult(
-        `Failed to create Task Thread tab: ${tab.error.message}`,
+        describeTabFailure(
+          tab.error.message,
+          rollback.ok ? undefined : rollback.error.message,
+        ),
         undefined,
         true,
       );

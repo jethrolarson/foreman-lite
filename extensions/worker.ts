@@ -40,7 +40,7 @@ const WORKER_ROLE_PROMPT = readRole("worker");
  * heuristic here. If it turns out real usage needs an exception, add it
  * then, with a reason, not preemptively.
  */
-function calledWorkerSignal(messages: AgentMessage[]): boolean {
+export const calledWorkerSignal = (messages: AgentMessage[]): boolean => {
   return messages.some(
     (m) =>
       m.role === "assistant" &&
@@ -48,9 +48,11 @@ function calledWorkerSignal(messages: AgentMessage[]): boolean {
         (c) => c.type === "toolCall" && c.name === SIGNAL_TOOL_NAME,
       ),
   );
-}
+};
 
-function endedWithModelFailure(messages: AgentMessage[]): boolean {
+export const workerEndedWithModelFailure = (
+  messages: AgentMessage[],
+): boolean => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message) continue;
@@ -58,7 +60,7 @@ function endedWithModelFailure(messages: AgentMessage[]): boolean {
       return message.stopReason === "error" || message.stopReason === "aborted";
   }
   return false;
-}
+};
 
 function appendTaskEvent(
   taskId: string,
@@ -84,7 +86,7 @@ function describeAction(action: WorkerAction, context: string): string {
   }
 }
 
-function buildWorkerSignalTool(pi: ExtensionAPI, taskId: string) {
+export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
   return defineTool({
     name: "worker_signal",
     label: "Worker Signal",
@@ -131,7 +133,7 @@ function buildWorkerSignalTool(pi: ExtensionAPI, taskId: string) {
       };
     },
   });
-}
+};
 
 export default function (pi: ExtensionAPI) {
   const taskId = taskIdFromEnvironment();
@@ -158,7 +160,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", (event) => {
     if (
       calledWorkerSignal(event.messages) ||
-      endedWithModelFailure(event.messages)
+      workerEndedWithModelFailure(event.messages)
     ) {
       // Provider/model errors and an explicit halt give the agent no chance to
       // signal. A corrective turn would retry a failed or intentionally aborted

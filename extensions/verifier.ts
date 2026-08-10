@@ -30,7 +30,7 @@ const MAX_NAGS_PER_RUN = 3;
 // turn 1 — not a skill, to avoid the progressive-disclosure read gate.
 const VERIFIER_ROLE_PROMPT = readRole("verifier");
 
-function calledVerifierSignal(messages: AgentMessage[]): boolean {
+export const calledVerifierSignal = (messages: AgentMessage[]): boolean => {
   return messages.some(
     (m) =>
       m.role === "assistant" &&
@@ -38,9 +38,11 @@ function calledVerifierSignal(messages: AgentMessage[]): boolean {
         (c) => c.type === "toolCall" && c.name === SIGNAL_TOOL_NAME,
       ),
   );
-}
+};
 
-function endedWithModelFailure(messages: AgentMessage[]): boolean {
+export const verifierEndedWithModelFailure = (
+  messages: AgentMessage[],
+): boolean => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message) continue;
@@ -48,7 +50,7 @@ function endedWithModelFailure(messages: AgentMessage[]): boolean {
       return message.stopReason === "error" || message.stopReason === "aborted";
   }
   return false;
-}
+};
 
 function appendTaskEvent(
   taskId: string,
@@ -74,7 +76,7 @@ function describeAction(action: VerifierAction, context: string): string {
   }
 }
 
-function buildVerifierSignalTool(pi: ExtensionAPI, taskId: string) {
+export const buildVerifierSignalTool = (pi: ExtensionAPI, taskId: string) => {
   return defineTool({
     name: SIGNAL_TOOL_NAME,
     label: "Verifier Signal",
@@ -109,7 +111,7 @@ function buildVerifierSignalTool(pi: ExtensionAPI, taskId: string) {
       };
     },
   });
-}
+};
 
 export default function (pi: ExtensionAPI) {
   const taskId = taskIdFromEnvironment();
@@ -129,7 +131,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", (event) => {
     if (
       calledVerifierSignal(event.messages) ||
-      endedWithModelFailure(event.messages)
+      verifierEndedWithModelFailure(event.messages)
     ) {
       // Provider/model errors and explicit halts aren't behavioral omissions;
       // corrective turns only repeat a failed or intentionally aborted request.
