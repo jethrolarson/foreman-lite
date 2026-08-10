@@ -124,6 +124,34 @@ describe("inbox protocol", () => {
     ).toContain("missing required");
   });
 
+  it("rejects a stale owner when takeover occurs before lease acquisition", () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "foreman-inbox-"));
+    roots.push(stateRoot);
+    let id = 0;
+    let current = "";
+    let takeOver = true;
+    const protocol = createInboxProtocol({
+      stateRoot,
+      now: () => 123,
+      newId: () => `id-${++id}`,
+      beforeDeliveryLease: () => {
+        if (!takeOver) return;
+        takeOver = false;
+        current = protocol.claim("pane", "current");
+      },
+    });
+    protocol.queue("pane", message("one"));
+    const stale = protocol.claim("pane", "stale");
+    const sent: InboxMessage[] = [];
+    protocol.drain("pane", stale, (value) => sent.push(value));
+    expect(sent).toEqual([]);
+    expect(() =>
+      readFileSync(join(protocol.paths("pane").delivered, "one.json")),
+    ).toThrow();
+    protocol.drain("pane", current, (value) => sent.push(value));
+    expect(sent.map(({ id: messageId }) => messageId)).toEqual(["one"]);
+  });
+
   it("linearizes delivery authority with a lease across synchronous takeover", () => {
     const { protocol } = setup();
     protocol.queue("pane", message("one"));

@@ -27,6 +27,7 @@ export interface InboxDependencies {
   now: () => number;
   newId: () => string;
   isProcessAlive?: (pid: number) => boolean;
+  beforeDeliveryLease?: (paneId: string, filename: string) => void;
 }
 
 export interface InboxProtocol {
@@ -124,6 +125,7 @@ export const createInboxProtocol = ({
       return (error as NodeJS.ErrnoException).code === "EPERM";
     }
   },
+  beforeDeliveryLease = () => {},
 }: InboxDependencies): InboxProtocol => {
   const paths = (paneId: string) => {
     const root = join(stateRoot, "inboxes", encodeURIComponent(paneId));
@@ -245,8 +247,13 @@ export const createInboxProtocol = ({
       for (const path of undelivered(paneId)) {
         if (!owns(paneId, token)) return;
         const filename = basename(path);
+        beforeDeliveryLease(paneId, filename);
         const lease = acquireDelivery(paneId, filename, token);
         if (!lease) continue;
+        if (!owns(paneId, token)) {
+          rmSync(lease, { force: true });
+          return;
+        }
         let message: InboxMessage;
         try {
           const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
