@@ -47,6 +47,8 @@ interface TaskRecordBase {
   branch: string;
   paneId: string;
   prompt: string;
+  // Set from the Worker's done signal; routes review and merge attention.
+  prUrl?: string;
   // Forwarded from Foreman's env so spawned Verifiers use a working config.
   provider?: string;
   model?: string;

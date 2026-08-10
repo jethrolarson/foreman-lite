@@ -18,9 +18,12 @@ agent doing the work + a **Verifier** agent reviewing the Worker's actual change
 - Worker: `planned` · `done` · `flag`
 - Verifier: `approve` · `deny` · `flag`
 
-A herdr plugin watches every pane and routes signals automatically — a `done`
-spawns/prompts the Verifier; a `deny` sends the work back to the Worker; all land
-in Foreman's conversation. Merge authority stays with you.
+A herdr plugin watches every pane and routes signals automatically. `done`
+requires the Worker to push its branch and open a PR, then spawns/prompts the
+Verifier. The Verifier leaves a visibly marked review comment on that PR; a
+`deny` sends the Worker back to those comments. All signals also land in
+Foreman's conversation, where Foreman decides contextually whether they need
+your attention. Merge authority stays with you.
 
 ## Setup (once per machine)
 
@@ -55,6 +58,7 @@ docs/        vision.md (the what/why), handoff.md (current state + how to verify
 
 ## Status
 
-Functionally complete per `docs/vision.md` modulo one open product decision
-(what `approve` terminates with — currently "flag the human, they merge").
-See `docs/handoff.md` for what's verified and the known rough edges.
+Functionally complete per `docs/vision.md`. Workers open PRs, Verifiers keep a
+durable marked review record in PR comments, Foreman decides contextually which
+signals warrant human attention, and merge authority stays with the human. See
+`docs/handoff.md` for what's verified and the known rough edges.

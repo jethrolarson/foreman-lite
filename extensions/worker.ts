@@ -8,9 +8,10 @@
  * `flag` reports blocked state to herdr (if the herdr pi integration is
  * installed) via the same `herdr:blocked` event its own extension listens
  * for — see `herdr integration install pi`. `planned`/`done` clear it.
- * Domain-level detail (the `context` argument) is durable task state: it's
- * appended to a file inside the worktree, not just relayed through herdr,
- * so it survives independent of any pane/session lifecycle.
+ * Domain-level routing detail (the `context` argument) is appended under
+ * `~/.foreman/tasks/<id>/`, outside the worktree, so it survives pane/session
+ * lifecycle without dirtying the user's source tree. Durable review detail
+ * lives in marked GitHub PR comments.
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -18,7 +19,6 @@ import { dirname } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { readRole } from "./roles.js";
 import { taskIdFromCwd, taskEventsPath } from "./taskState.js";
@@ -54,19 +54,20 @@ function appendTaskEvent(
   worktreeRoot: string,
   action: WorkerAction,
   context: string,
+  prUrl?: string,
 ): void {
   const path = taskEventsPath(taskIdFromCwd(worktreeRoot));
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(
     path,
-    `${JSON.stringify({ role: "worker", action, context, timestamp: Date.now() })}\n`,
+    `${JSON.stringify({ role: "worker", action, context, prUrl, timestamp: Date.now() })}\n`,
   );
 }
 
 function describeAction(action: WorkerAction, context: string): string {
   switch (action) {
     case "planned":
-      return `Plan ready for review: ${context}`;
+      return `Plan checkpoint requested: ${context}`;
     case "done":
       return `Work ready for review: ${context}`;
     case "flag":
@@ -79,22 +80,35 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
     name: "worker_signal",
     label: "Worker Signal",
     description:
-      "Emit a lifecycle signal: `planned` (plan ready for review), `done` (work ready for review), or `flag` (blocked, needs human/foreman input). Every turn must end with one of these once work has actually progressed or stalled — don't emit one for ordinary conversation.",
+      "Emit a lifecycle signal: `planned` (pause for Foreman plan input), `done` (committed work pushed and a PR opened; prUrl required), or `flag` (blocked, needs input). Every turn must end with one once work has progressed or stalled — don't emit planned as a routine progress ping because it terminates the turn.",
     promptSnippet: "Emit a Worker lifecycle signal (planned/done/flag)",
     promptGuidelines: [
-      "Prefer flag-and-be-safe over done-and-wrong: an incorrect /flag costs a question, an incorrect /done costs a wrong result reaching review.",
+      "Before done, commit and push the work, open the PR, and supply its URL. Prefer flag-and-be-safe over done-and-wrong.",
     ],
-    parameters: Type.Object({
-      action: StringEnum(["planned", "done", "flag"] as const),
-      context: Type.String({
-        description:
-          "What to review (plan/PR/diff description), or what's blocking progress",
+    parameters: Type.Union([
+      Type.Object({
+        action: Type.Literal("planned"),
+        context: Type.String({
+          description: "The plan and what input or redirection is needed",
+        }),
       }),
-    }),
+      Type.Object({
+        action: Type.Literal("done"),
+        context: Type.String({ description: "What changed and was tested" }),
+        prUrl: Type.String({
+          description: "URL of the pull request opened for this work",
+        }),
+      }),
+      Type.Object({
+        action: Type.Literal("flag"),
+        context: Type.String({ description: "What is blocking progress" }),
+      }),
+    ]),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const worktreeRoot = ctx.cwd;
-      appendTaskEvent(worktreeRoot, params.action, params.context);
+      const prUrl = params.action === "done" ? params.prUrl : undefined;
+      appendTaskEvent(worktreeRoot, params.action, params.context, prUrl);
 
       pi.events.emit("herdr:blocked", {
         active: params.action === "flag",
@@ -105,7 +119,7 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
         content: [
           { type: "text", text: describeAction(params.action, params.context) },
         ],
-        details: { action: params.action, context: params.context },
+        details: { action: params.action, context: params.context, prUrl },
         terminate: true,
       };
     },
@@ -114,9 +128,10 @@ function buildWorkerSignalTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool(buildWorkerSignalTool(pi));
+  const taskId = taskIdFromCwd(process.cwd());
 
   pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${WORKER_ROLE_PROMPT}`,
+    systemPrompt: `${event.systemPrompt}\n\nYour foreman-lite task id is \`${taskId}\`.\n\n${WORKER_ROLE_PROMPT}`,
   }));
 
   // Turn-end enforcement: pi has no direct "stop hook" that can veto

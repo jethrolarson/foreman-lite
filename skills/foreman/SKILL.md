@@ -9,13 +9,13 @@ Your role directives (what you must/should do, escalation, halt semantics) are i
 
 ## Task model
 
-A Task Thread = one human request = a git worktree + a Worker agent + a Verifier agent (Verifier in the *same* worktree, so it sees real changes) + Task State on disk.
+A Task Thread = one human request = a git worktree + a Worker agent + a Verifier agent (Verifier in the _same_ worktree, so it sees real changes) + Task State on disk.
 
-| Role | Extension | Tools |
-|------|-----------|-------|
-| Foreman (you) | `extensions/foreman.ts` | `create_task`, `halt_worker`, `flag` |
-| Worker | `extensions/worker.ts` | `worker_signal` |
-| Verifier | `extensions/verifier.ts` | `verifier_signal` |
+| Role          | Extension                | Tools                                |
+| ------------- | ------------------------ | ------------------------------------ |
+| Foreman (you) | `extensions/foreman.ts`  | `create_task`, `halt_worker`, `flag` |
+| Worker        | `extensions/worker.ts`   | `worker_signal`                      |
+| Verifier      | `extensions/verifier.ts` | `verifier_signal`                    |
 
 Only Foreman creates tasks; Workers/Verifiers never get `create_task`/`halt_worker`/`flag`, and you never get the signal tools. Each role's directives are injected by its own extension via system-prompt (not loaded as skills) so they're active from turn 1.
 
@@ -23,19 +23,21 @@ Only Foreman creates tasks; Workers/Verifiers never get `create_task`/`halt_work
 
 Every Worker/Verifier turn must end with a signal (an enforcement hook nags them if not). Signals are the only way work moves between threads.
 
-- Worker `worker_signal`: `planned` (plan ready for review), `done` (work ready for review), `flag` (blocked, needs input).
-- Verifier `verifier_signal`: `approve` (accepted), `deny` (sent back to Worker with what to fix), `flag` (concern to you — Worker malfunctioning or large risk).
+- Worker `worker_signal`: `planned` (deliberate pause for your input/redirection), `done` (PR opened and ready for review; includes `prUrl`), `flag` (blocked, needs input). Only `done` starts or re-prompts a Verifier because durable review happens on the PR.
+- Verifier `verifier_signal`: `approve` (accepted), `deny` (detailed marked feedback was posted on the PR), `flag` (concern to you — Worker malfunctioning or large risk).
 
-You don't poll. The `task-events` herdr plugin watches every pane and pushes transitions into your conversation ("Task X (done): ...", "Task X verifier (done): approved: ..."). That pushed message *is* the signal.
+You don't poll. The `task-events` herdr plugin watches every pane and pushes transitions into your conversation as user-role text beginning with `::foreman-signal::`; the header identifies source, task, action/verdict, and PR URL when available. That marked message is an automated signal, not the human speaking.
 
 ## On-disk state (and recovering after compaction)
 
 - HAZARD: compaction rewrites your conversation but not the on-disk task state — if you lose track of threads, re-read disk rather than guessing.
-- `~/.foreman/registry.json` — global, keyed by pane id. Each entry: `id`, `role` (`worker`|`verifier`), `repoRoot`, `worktreePath`, `branch`, `paneId`, `foremanPaneId`, `prompt`, `provider`, `model`, `verifierPaneId` (worker entries) / `workerPaneId` (verifier entries), `createdAt`. Start here: `cat ~/.foreman/registry.json`.
-- `<repoRoot>/.foreman/tasks/<id>/meta.json` — repo-local copy of the worker record.
-- `<worktree>/.task/events.jsonl` — one JSON line per signal `{role, action, context, timestamp}`; the last line is the thread's current state: `tail -1 <worktreePath>/.task/events.jsonl`.
+- `~/.foreman/registry.json` — global, keyed by pane id. Each entry: `id`, `role` (`worker`|`verifier`), `repoRoot`, `worktreePath`, `branch`, `paneId`, `foremanPaneId`, `prompt`, optional `prUrl`, provider/model, verifier/worker pane link, and `createdAt`. Start here: `cat ~/.foreman/registry.json`.
+- `~/.foreman/tasks/<id>/meta.json` — per-task worker record.
+- `~/.foreman/tasks/<id>/events.jsonl` — one JSON line per signal `{role, action, context, prUrl?, timestamp}`; the last line is the thread's current state.
 
-Recovery: `cat ~/.foreman/registry.json` → for each task `tail -1` its `events.jsonl` → every thread's id, panes, and current signal.
+CONTEXT: task state lives outside repositories because repo-local metadata was observed dirtying both the main checkout and Worker worktrees.
+
+Recovery: `cat ~/.foreman/registry.json` → for each task `tail -1 ~/.foreman/tasks/<id>/events.jsonl` → every thread's id, panes, PR URL, and current signal.
 
 ## herdr commands
 

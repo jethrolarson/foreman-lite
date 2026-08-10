@@ -15,7 +15,7 @@ I want foreman to ensure that verification processes complete without doing the 
 - `[context]` string. whatever the situation demands. could be short sentence, filepath, pr url, commit id, etc.
 - Task Thread - conceptual grouping of task agents and task state and working memory associated with a human's request
 - Working Memory - LLM conversation content for a specific agent. This could be compacted if necessary.
-- Task State - file state associated with a task thread. Probably isolated to git worktree so task threads don't conflict with each other. Shared between worker and verifier.
+- Task State - file state associated with a task thread, shared between Worker and Verifier under `~/.foreman/tasks/<id>/` so orchestration metadata does not dirty source trees.
 
 ## Agent roles
 
@@ -41,13 +41,13 @@ Must end each turn with a command. Hook should ensure this is satisfied. Worker 
 
 **Commands**
 
-- /planned [context] - Worker declares that their plan is ready for review. This will be passed to the verifier by default (foreman discretion). Worker may skip this step for trivial requests.
-- /done [context] - worker declares task is ready for review. Content argument indicates the thing to review. Could be a spec or pull request or any other plain prose. Work is passed to verifier by default (foreman discretion)
+- /planned [context] - Worker deliberately pauses for Foreman input or redirection on a plan. It should otherwise continue through implementation and /done because signaling ends the turn.
+- /done [context, prUrl] - Worker declares task ready for review after committing, pushing, and opening a pull request. This starts or re-prompts Verifier review on that PR.
 - /flag [context] - worker declares that they're blocked and need help. This could be for a decision from the human or because the request is not completable or any other issue preventing progress on task. Foreman will see this and decide how to address (if obvious without getting into the details) or raise the flag to the human.
 
 ### Verifier
 
-Verifies work planned or completed by the Worker agent. What that means is contextual. Verifier persists for the full task thread
+Verifies completed Worker work on its pull request. Detailed review is recorded in visibly marked GitHub comments rather than source files; Verifier persists for the full task thread.
 
 **Commands**
 
@@ -55,7 +55,7 @@ Verifies work planned or completed by the Worker agent. What that means is conte
 - /deny [context] - Send work back to Worker for changes
 - /flag - Raise concern to the foreman when it seems like the worker is malfunctioning or if there's some large risk identified that the worker agent is unlikely to be able to resolve.
 
-# Open questions
+# Decisions and open questions
 
-- What happens when work is approved? Do we merge? Who gets authority to merge?
-- Should we bring back the /recycle command which would allow foreman to decide when to compact?
+- Approved work remains in its PR; Foreman does not merge. Foreman decides contextually whether any lifecycle signal warrants interrupting the human, while merge authority remains human.
+- Open: should we bring back the /recycle command which would allow foreman to decide when to compact?

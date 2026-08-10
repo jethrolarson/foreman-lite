@@ -9,8 +9,8 @@ Read this one, not that one.
 ## Where things actually stand
 
 **`docs/vision.md`** is still the source of truth, user-authored. Nothing
-in this session contradicted it — the herdr discovery changed *how* it
-gets built, not *what* it says.
+in this session contradicted it — the herdr discovery changed _how_ it
+gets built, not _what_ it says.
 
 **`skills/foreman/SKILL.md`** is still stale (Claude-Code-era vocabulary,
 `.claude/foreman-lite/` paths). Deferred three times now across two
@@ -25,15 +25,15 @@ better than what was originally planned (Foreman polling).
 ## What's built, and genuinely verified (not just written)
 
 ### `extensions/foreman.ts` — Foreman's capability
+
 - `create_task` tool: `herdr worktree create` + `herdr agent start --kind
-  pi -- -e <worker.ts path> <prompt>`. No tmux, no shell strings anywhere
+pi -- -e <worker.ts path> <prompt>`. No tmux, no shell strings anywhere
   (herdr's `--` argv is a real array).
-- Writes `.foreman/tasks/<id>/meta.json` (repo-local) **and**
-  `~/.foreman/registry.json` (global, cross-repo, keyed by pane id) — the
-  registry is what the herdr plugin (below) uses to map a pane back to a
-  task; `create_task` also stamps `foremanPaneId` into both, read from
-  its own `process.env.HERDR_PANE_ID` at creation time (correct
-  automatically when Foreman itself runs inside herdr — no config).
+- Writes `~/.foreman/tasks/<id>/meta.json` and
+  `~/.foreman/registry.json` (global, cross-repo, keyed by pane id) — no
+  task metadata is written into the user's repo. The registry maps panes
+  back to tasks; `create_task` also stamps `foremanPaneId` into both,
+  read from its own `process.env.HERDR_PANE_ID` at creation time.
 - Real, live-reproduced bug fixed: `agent start` immediately after
   `worktree create` intermittently fails `agent_pane_busy` (pane not at
   an available shell prompt yet). Fixed with a bounded retry
@@ -63,10 +63,10 @@ better than what was originally planned (Foreman polling).
   aborted turn, and the Worker then calls `worker_signal`. So halt means
   "interrupt this turn, pane/worktree kept, Worker can be prompted
   again" — exactly what vision.md wants, not a kill.
-  
+
   (Side note on how this was confirmed, worth keeping because the first
   test attempt was confounded: a Worker spawned via `create_task`
-  disappeared on its own *without* any `esc`, both in the original
+  disappeared on its own _without_ any `esc`, both in the original
   session and reproduced now — root cause was that `create_task` passed
   `-e worker.ts <prompt>` with **no `--provider`/`--model`**, so the
   Worker used defaults, and the default `zai`/`glm-5.2` key was 401'ing
@@ -83,34 +83,38 @@ better than what was originally planned (Foreman polling).
   auth-exit.)
 
 ### `extensions/worker.ts` — Worker's capability
-- `worker_signal` tool: `planned` / `done` / `flag`. Writes to
-  `<worktree>/.task/events.jsonl` (real Task State per vision.md — plain
-  file in the worktree) and emits `pi.events.emit("herdr:blocked", ...)`
-  for `flag` (herdr's own installed pi integration, see below, turns that
-  into `agent_status: "blocked"` with zero socket code on our part).
+
+- `worker_signal` tool: `planned` / `done` / `flag`. `planned` is a
+  deliberate pause for Foreman input (not a routine progress ping); `done`
+  is a discriminated schema variant requiring `prUrl`, after commit, push,
+  and PR creation. Signals append to
+  `~/.foreman/tasks/<id>/events.jsonl` (outside the repo) and emit
+  `pi.events.emit("herdr:blocked", ...)` for `flag`.
 - **Turn-end enforcement hook**: pi has no direct Stop-hook equivalent
   that can veto ending a run. Standard pi pattern instead (same one the
   bundled `plan-mode` example uses): hook `agent_end`, check whether the
   run's messages included a `worker_signal` tool call, and if not, inject
   a corrective message with `pi.sendMessage(..., { triggerTurn: true,
-  deliverAs: "followUp" })`, forcing another run before the session is
+deliverAs: "followUp" })`, forcing another run before the session is
   ever idle without a signal. Bounded by `MAX_NAGS_PER_RUN = 3`, then it
   settles instead of forcing forever.
   - **Verified live**: gave a Worker a trivial prompt, it replied in
     plain text with no tool call, got nagged once, called
     `worker_signal`. Confirmed by reading the session JSONL directly —
     `pi -p`'s stdout looked empty and was misleading (it only prints the
-    *final* message's text content, and the final message here was a
+    _final_ message's text content, and the final message here was a
     tool call with no text).
   - **Not verified live**: the `MAX_NAGS_PER_RUN` cutoff-and-settle
     branch itself (hard to force a model to stonewall on purpose).
     Implemented, untested.
 
 ### `extensions/verifier.ts` — Verifier's capability
-- `verifier_signal` tool: `approve` / `deny` / `flag`. Same shape as
-  `worker_signal`: appends to the shared `<worktree>/.task/events.jsonl`
-  with `role: "verifier"` (Worker stamps `role: "worker"`), emits
-  `herdr:blocked` for `flag`. `terminate: true` ends the turn.
+
+- `verifier_signal` tool: `approve` / `deny` / `flag`. Appends to the
+  shared `~/.foreman/tasks/<id>/events.jsonl` with `role: "verifier"`,
+  emits `herdr:blocked` for `flag`, and terminates the turn. The detailed
+  durable review is a visibly marked GitHub PR comment; signal context is
+  only a routing summary.
 - Same turn-end nag hook as worker.ts (`MAX_NAGS_PER_RUN = 3`): a
   Verifier that goes idle without a verdict is a stuck review.
 - **Verified live, all three verdicts**: `approve` (full chain — Worker
@@ -119,10 +123,11 @@ better than what was originally planned (Foreman polling).
   Verifier read it → Verifier caught the mismatch, denied → plugin
   re-prompted the Worker, which resumed `working`); `flag` (asked the
   Verifier to falsely deny already-approved correct work → it refused
-  and flagged instead, validating both the `flag` routing *and* the
+  and flagged instead, validating both the `flag` routing _and_ the
   prompt guideline against rubber-stamping).
 
 ### `plugins/task-events/` — the automatic-notification piece
+
 This is a **herdr plugin**, a different kind of artifact than the pi
 extensions above — a directory with `herdr-plugin.toml` + `notify.mjs`,
 registered via `herdr plugin link <dir>` (local dev) rather than loaded
@@ -134,20 +139,23 @@ your messages to make it check. This was the actual decision point this
 session; see "Key decisions" below.
 
 **How it works** (now role-aware, routing both Worker and Verifier
-signals): herdr fires `pane.agent_status_changed` for *every* pane on
+signals): herdr fires `pane.agent_status_changed` for _every_ pane on
 the machine. `notify.mjs`:
+
 1. Reads `HERDR_PLUGIN_EVENT_JSON.data.{pane_id,agent_status}`.
 2. No-ops for `working`/`unknown` and for panes not in
    `~/.foreman/registry.json`.
-3. Looks up the task, reads the last line of `.task/events.jsonl`.
+3. Looks up the task and reads the last line of
+   `~/.foreman/tasks/<id>/events.jsonl`.
 4. Routes by the pane's registry `role`:
-   - **Worker** `planned`/`done` → notify Foreman **and** ensure a
-     Verifier exists for the task: spawn one on first review (new pane
-     in the *same* worktree via `herdr workspace create --cwd
-     <worktree>` + `herdr agent start ... -e verifier.ts <prompt>`), or
-     re-prompt the existing one. `flag` → notify Foreman only.
-   - **Verifier** `approve`/`flag` → notify Foreman. `deny` → notify
-     Foreman **and** prompt the Worker to fix and re-signal `done`.
+   - **Worker** signals notify Foreman. Only `done` (which includes the PR
+     URL) starts review: spawn a Verifier as a split in the Worker's
+     workspace, or re-prompt the existing one to re-review the PR.
+   - **Verifier** verdicts notify Foreman. `deny` also prompts the Worker
+     with the PR URL and tells it to read the marked Verifier comment,
+     fix, push, respond on the PR, and re-signal `done`.
+     Foreman independently decides whether any signal context warrants an
+     OS-notification `flag`; verdict names do not determine attention.
 
 Verifier spawn writes a second registry entry (`role: "verifier"`,
 linked back to the worker pane via `workerPaneId`; the worker entry gets
@@ -194,6 +202,7 @@ herdr integration install pi     # installs ~/.pi/agent/extensions/herdr-agent-s
                                   # machine, not just foreman-lite's.
 herdr plugin link /path/to/foreman-lite/plugins/task-events
 ```
+
 Foreman itself is launched as
 `pi -e /path/to/foreman-lite/extensions/foreman.ts --skill /path/to/foreman-lite/skills/foreman`
 from the target project's repo root. As above, that `pi` process must itself
@@ -208,7 +217,7 @@ system prompt by the matching extension via `before_agent_start` (read by
 `extensions/roles.ts`). Skills are progressive-disclosure (body loads
 on-demand via `read`, which models don't always do) — wrong for a role that
 must govern turn 1. `skills/foreman/SKILL.md` remains as Foreman's on-demand
-*reference* (task model, on-disk state, herdr commands, compaction recovery);
+_reference_ (task model, on-disk state, herdr commands, compaction recovery);
 the directives are injected, not duplicated there. Verified live with the
 refactor: Worker done → Verifier spawned (role injected, spawn prompt
 reduced to task context only) → approve.
@@ -216,6 +225,7 @@ reduced to task context only) → approve.
 ## How to re-verify any of this from scratch
 
 This is the pattern used throughout this session, worth keeping:
+
 1. `herdr status` → if server not running, `nohup herdr server > /tmp/herdr-server.log 2>&1 &`.
 2. Make a scratch git repo (`mktemp -d`, `git init -b main`, one empty commit).
 3. Make a "dummy Foreman" pane to observe pushes without touching your
@@ -244,7 +254,7 @@ fine to delete between test runs.
   creation (`herdr worktree create`), push (`agent prompt`), pull
   (`agent attach`), halt (`agent send-keys`), and — the new one this
   session — automatic reactive notification (`[[events]] on =
-  "pane.agent_status_changed"` in a plugin). None of this is
+"pane.agent_status_changed"` in a plugin). None of this is
   reimplemented; all of it is a thin adapter calling herdr's CLI/plugin
   surface.
 - **What herdr genuinely can't give us**, confirmed by direct
@@ -256,8 +266,9 @@ fine to delete between test runs.
   concept of "Foreman must not implement," that's pure structural
   scoping on our side (which extension loads where); (3) domain content
   (the actual "what to review"/"why blocked" text) — herdr states carry
-  at most a short label, the real content lives in `.task/events.jsonl`;
-  (4) task identity that outlives one pane's process lifetime — herdr's
+  at most a short label; routing summaries live in the external task event
+  log and durable review details live on the PR; (4) task identity that
+  outlives one pane's process lifetime — herdr's
   name→agent mapping clears on exit, `registry.json`/`meta.json` don't.
 - **Push over pull for Foreman awareness, decisively, not just
   preferentially.** The deciding argument: an idle LLM session cannot
@@ -266,7 +277,7 @@ fine to delete between test runs.
   automatically" no matter how good the polling tool is. This is why the
   herdr plugin exists instead of the previously-planned Foreman-side
   poller (that plan is now dead, not deferred).
-- Two named, reproduced, *not* fully root-caused "file write, then
+- Two named, reproduced, _not_ fully root-caused "file write, then
   immediate re-read elsewhere, sometimes misses it" races this session
   (herdr's own `agent_pane_busy`, and our own plugin's registry lookup).
   Both mitigated the same way (bounded retry on the specific observed
@@ -275,7 +286,7 @@ fine to delete between test runs.
   worth actually chasing to ground truth rather than retry-patching a
   third time.
 - Herdr's `AgentStatus` enum is `idle | working | blocked | done |
-  unknown`. Our own pi integration (`herdr-agent-state.ts`, herdr's file,
+unknown`. Our own pi integration (`herdr-agent-state.ts`, herdr's file,
   not ours) only ever reports 3 of those 5 (`working`/`idle`/`blocked`).
   `done` and `unknown` are herdr's own bookkeeping layered on top — not
   something we can rely on distinguishing ourselves. `notify.mjs`
@@ -284,17 +295,14 @@ fine to delete between test runs.
 
 ## Next steps, in order
 
-1. Decide approve's terminal action — vision.md leaves "what happens
-   when work is approved? merge? who merges?" open. Currently `approve`
-   just notifies Foreman and the task sits (worktree + branch persist);
-   the SKILL.md tells Foreman to `flag` the human that work is approved
-   and ready to merge (merge authority stays with the human). That's the
-   recommended (a) default; revisit if you want Foreman to merge.
+1. Dogfood the PR workflow: Worker creates a marked PR, Verifier posts a
+   marked review comment, deny routes the Worker to that URL, and repeat
+   review stays on the same PR.
 2. Refresh this file again as anything above changes.
 
 ## Functional completeness
 
-Minus the approve-merge decision above, the build is functionally
+With merge authority retained by the human, the build is functionally
 complete per vision.md: all three roles' commands exist and are
 live-verified, the task-events plugin auto-routes every signal, and
 `skills/foreman/SKILL.md` now carries Foreman's role definition + the

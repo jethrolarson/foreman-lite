@@ -2,12 +2,14 @@
 // pane herdr knows about, not just ours. Routes Task Thread lifecycle
 // signals to the right place based on the pane's role:
 //
-//   Worker  planned/done -> notify Foreman + ensure a Verifier exists
-//                           (spawn on first review, else re-prompt it)
-//   Worker  flag         -> notify Foreman only
+//   Worker  planned      -> notify Foreman
+//   Worker  done + PR    -> notify Foreman + spawn/re-prompt Verifier
+//   Worker  flag         -> notify Foreman
 //   Verifier approve     -> notify Foreman (task complete pending merge)
-//   Verifier deny        -> notify Foreman + prompt Worker to fix
+//   Verifier deny        -> notify Foreman + route Worker to PR feedback
 //   Verifier flag        -> notify Foreman
+//
+// Foreman independently decides whether any signal warrants human attention.
 //
 // See docs/vision.md (roles) and docs/handoff.md (why push, not poll).
 // Deliberately a no-op (exit 0) for anything not ours: herdr runs this
@@ -20,7 +22,9 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const REACTABLE_STATUSES = new Set(["idle", "blocked", "done"]);
-const VERIFIER_ACTIONS = new Set(["planned", "done"]);
+// Verification starts only once `done` guarantees a PR exists. `planned`
+// is a deliberate Foreman checkpoint; there is no durable review surface yet.
+const VERIFIER_ACTIONS = new Set(["done"]);
 
 function readJsonEnv(name) {
   const raw = process.env[name];
@@ -64,6 +68,21 @@ function upsertEntry(record) {
   const registry = readRegistry();
   registry[record.paneId] = record;
   writeRegistry(registry);
+}
+
+function setTaskPrUrl(taskId, prUrl) {
+  const registry = readRegistry();
+  for (const record of Object.values(registry)) {
+    if (record.id === taskId) record.prUrl = prUrl;
+  }
+  writeRegistry(registry);
+
+  const metaPath = join(homedir(), ".foreman", "tasks", taskId, "meta.json");
+  const meta = readJsonOptional(metaPath);
+  if (meta) {
+    meta.prUrl = prUrl;
+    writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+  }
 }
 
 // Per-task state lives under ~/.foreman/tasks/<id>/ (not in the repo), so
@@ -200,13 +219,15 @@ function buildVerifierPrompt(task, event) {
   // Role framing is injected by verifier.ts's system-prompt hook; this is
   // just the per-task review context. Passed via @file (see spawnVerifier) so
   // newlines/quotes in the worker's context don't trip herdr's shell encoder.
+  const prUrl = event.prUrl ?? task.prUrl;
   return [
     `Task ${task.id}.`,
+    `Pull request: ${prUrl ?? "locate it with `gh pr view --json url`"}`,
     `Original request: ${task.prompt}`,
     `Worker signal: ${event.action} — ${event.context}`,
     "",
-    "Review the work in this repo against the request: read the changes, run tests, re-check the spec. Do not implement fixes yourself — a deny sends it back to the Worker.",
-    "Then call verifier_signal: approve (work is correct), deny (with what to fix), or flag (raise a concern to Foreman).",
+    "Review the work against the request: inspect the PR diff, read the changes, run tests, and re-check the spec. Put the durable review in a marked GitHub PR comment; do not commit review notes or implement fixes yourself.",
+    "Then call verifier_signal: approve (work is correct), deny (short summary; detailed feedback is on the PR), or flag (raise a concern to Foreman).",
   ].join("\n");
 }
 
@@ -372,6 +393,11 @@ if (!task) {
 
 const lastEvent = lastTaskEvent(task.id);
 
+if (task.role === "worker" && lastEvent?.action === "done" && lastEvent.prUrl) {
+  task.prUrl = lastEvent.prUrl;
+  setTaskPrUrl(task.id, lastEvent.prUrl);
+}
+
 // A Worker going idle with no signal is ambiguous: the nag hook may be
 // re-triggering a turn, so the pane flickers idle between agent_end and the
 // followUp. Debounce — if it's working again shortly after, it's a flicker,
@@ -409,6 +435,7 @@ if (task.role === "worker") {
       task: task.id,
       status,
       signal: lastEvent?.action ?? "none",
+      ...(task.prUrl ? { prUrl: task.prUrl } : {}),
     },
     workerDetail(lastEvent),
   );
@@ -420,8 +447,13 @@ if (task.role === "worker") {
         task.verifierPaneId,
         signalEnvelope(
           "directive",
-          { source: "worker", task: task.id, signal: lastEvent.action },
-          `Worker ${lastEvent.action}: ${lastEvent.context}. Review again and verifier_signal.`,
+          {
+            source: "worker",
+            task: task.id,
+            signal: lastEvent.action,
+            ...(task.prUrl ? { prUrl: task.prUrl } : {}),
+          },
+          `Worker pushed updates to ${task.prUrl ?? "the task PR"}: ${lastEvent.context}. Review the PR again, leave a marked GitHub comment, then verifier_signal.`,
         ),
       );
     } else {
@@ -439,6 +471,7 @@ if (task.role === "verifier") {
       task: task.id,
       status,
       verdict: lastEvent?.action ?? "none",
+      ...(task.prUrl ? { prUrl: task.prUrl } : {}),
     },
     verifierDetail(lastEvent),
   );
@@ -449,8 +482,13 @@ if (task.role === "verifier") {
       task.workerPaneId,
       signalEnvelope(
         "directive",
-        { source: "verifier", task: task.id, verdict: "deny" },
-        `Verifier denied: ${lastEvent.context}. Address this and worker_signal done when ready.`,
+        {
+          source: "verifier",
+          task: task.id,
+          verdict: "deny",
+          ...(task.prUrl ? { prUrl: task.prUrl } : {}),
+        },
+        `Verifier left detailed feedback on ${task.prUrl ?? "the task PR (locate it with `gh pr view --json url`)"}. Read the marked Verifier comment, address it, push the fixes, leave a marked Worker response, then worker_signal done with the PR URL. Summary: ${lastEvent.context}`,
       ),
     );
   }

@@ -6,10 +6,9 @@
  * changes. Like worker.ts, every turn must end with a signal so a Verifier
  * can't go silently idle mid-review.
  *
- * Shares `.task/events.jsonl` with the Worker (Task State is shared between
- * worker and verifier per docs/vision.md); events are stamped `role:
- * "verifier"` so the task-events plugin can route them back to Foreman /
- * the Worker rather than re-triggering a Verifier spawn.
+ * Shares `~/.foreman/tasks/<id>/events.jsonl` with the Worker; events are
+ * stamped `role: "verifier"` so the task-events plugin can route them back
+ * to Foreman / the Worker rather than re-triggering a Verifier spawn.
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -70,16 +69,16 @@ function buildVerifierSignalTool(pi: ExtensionAPI) {
     name: SIGNAL_TOOL_NAME,
     label: "Verifier Signal",
     description:
-      "Emit a verdict: `approve` (work accepted), `deny` (send back to Worker with what to fix), or `flag` (raise a concern to Foreman — e.g. Worker seems malfunctioning or a large risk). Every turn must end with one of these once review is underway.",
+      "Emit a verdict after posting a marked GitHub PR review comment: `approve` (work accepted), `deny` (detailed feedback posted for Worker), or `flag` (raise a concern to Foreman). Keep context to a short summary; the durable review lives on the PR.",
     promptSnippet: "Emit a Verifier verdict (approve/deny/flag)",
     promptGuidelines: [
-      "Only approve work you have actually checked (tests run, spec re-read, diff inspected) — a rubber-stamp approve is worse than a deny.",
+      "Only approve work you actually checked. Before signaling, post the detailed review on the PR with the foreman-lite Verifier marker.",
     ],
     parameters: Type.Object({
       action: StringEnum(["approve", "deny", "flag"] as const),
       context: Type.String({
         description:
-          "For deny: what to fix. For flag: the concern. For approve: a short note (may be empty).",
+          "Short verdict summary. Detailed review belongs in the marked GitHub PR comment.",
       }),
     }),
 
@@ -105,9 +104,10 @@ function buildVerifierSignalTool(pi: ExtensionAPI) {
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool(buildVerifierSignalTool(pi));
+  const taskId = taskIdFromCwd(process.cwd());
 
   pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${VERIFIER_ROLE_PROMPT}`,
+    systemPrompt: `${event.systemPrompt}\n\nYour foreman-lite task id is \`${taskId}\`.\n\n${VERIFIER_ROLE_PROMPT}`,
   }));
 
   // Same turn-end enforcement as worker.ts: a Verifier that goes idle
