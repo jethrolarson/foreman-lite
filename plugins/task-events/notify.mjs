@@ -153,7 +153,6 @@ const message = {
   customType: "foreman-task-signal",
   content: `${label} for task ${task.id}: ${action}\n${context}`,
   details,
-  createdAt: taskEvent?.timestamp ?? Date.now(),
   triggerTurn: true,
   deliverAs: "steer",
 };

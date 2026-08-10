@@ -1,5 +1,7 @@
 ## Vision
 
+IMPORTANT: IF YOU'RE NOT JETHRO THE HUMAN DO NOT EDIT THIS DOCUMENT FFS
+
 I want to talk to a head llm agent (foreman) who manages basic plate-spinning for multiple LLM tasks. This agent does not directly complete work I request but delegates to task agent workflows which it keeps track of and can answer to. It should raise any important decisions to me but unblock task threads where safe.
 
 I want foreman to ensure that verification processes complete without doing the verification itself.
@@ -41,8 +43,8 @@ Must end each turn with a command. Hook should ensure this is satisfied. Worker 
 
 **Commands**
 
-- /planned [context] - Worker deliberately pauses for Foreman input or redirection on a plan. It should otherwise continue through implementation and /done because signaling ends the turn.
-- /done [context, prUrl] - Worker declares task ready for review after committing, pushing, and opening a pull request. This starts or re-prompts Verifier review on that PR.
+- /planned [context] - Worker declares that their plan is ready for review. This will be passed to the verifier by default (foreman discretion). Worker may skip this step for trivial requests.
+- /done [context] - worker declares task is ready for review. Content argument indicates the thing to review. Could be a spec or pull request or any other plain prose. Work is passed to verifier by default (foreman discretion)
 - /flag [context] - worker declares that they're blocked and need help. This could be for a decision from the human or because the request is not completable or any other issue preventing progress on task. Foreman will see this and decide how to address (if obvious without getting into the details) or raise the flag to the human.
 
 ### Verifier

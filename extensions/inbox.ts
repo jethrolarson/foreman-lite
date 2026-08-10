@@ -21,7 +21,6 @@ export interface InboxMessage {
   customType: string;
   content: string;
   details?: Record<string, unknown>;
-  createdAt: number;
   triggerTurn: boolean;
   deliverAs: "steer" | "followUp" | "nextTurn";
 }
@@ -46,7 +45,7 @@ const writeJsonAtomic = (path: string, value: unknown): void => {
   renameSync(temporary, path);
 };
 
-const writeJsonIfAbsent = (path: string, value: unknown): boolean => {
+const writeJsonIfAbsent = (path: string, value: unknown): void => {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
@@ -54,10 +53,8 @@ const writeJsonIfAbsent = (path: string, value: unknown): boolean => {
   });
   try {
     linkSync(temporary, path);
-    return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   } finally {
     unlinkSync(temporary);
   }
@@ -65,15 +62,11 @@ const writeJsonIfAbsent = (path: string, value: unknown): boolean => {
 
 export const queueInboxMessage = (
   paneId: string,
-  message: Omit<InboxMessage, "id" | "createdAt"> & {
-    id?: string;
-    createdAt?: number;
-  },
+  message: Omit<InboxMessage, "id"> & { id?: string },
 ): InboxMessage => {
   const queued: InboxMessage = {
     ...message,
     id: message.id ?? randomUUID(),
-    createdAt: message.createdAt ?? Date.now(),
   };
   writeJsonIfAbsent(join(messagesDir(paneId), `${queued.id}.json`), queued);
   return queued;
@@ -108,113 +101,117 @@ const undeliveredFiles = (paneId: string): string[] => {
   }
 };
 
-export const registerInbox = (pi: ExtensionAPI, paneId: string | undefined) => {
-  if (!paneId) return;
-
-  let watcher: FSWatcher | undefined;
-  let poller: NodeJS.Timeout | undefined;
-  let ownerToken: string | undefined;
-  let draining = false;
-  let drainAgain = false;
-
-  const ownsInbox = (): boolean =>
-    ownerToken !== undefined && readOwner(paneId) === ownerToken;
-
-  const drain = async (): Promise<void> => {
-    if (draining) {
-      drainAgain = true;
-      return;
-    }
-    draining = true;
+const deliverMessages = (
+  pi: ExtensionAPI,
+  paneId: string,
+  ownerToken: string,
+): void => {
+  for (const path of undeliveredFiles(paneId)) {
+    if (readOwner(paneId) !== ownerToken) return;
+    const filename = basename(path);
+    let message: InboxMessage;
     try {
-      do {
-        drainAgain = false;
-        for (const path of undeliveredFiles(paneId)) {
-          if (!ownsInbox()) return;
-          const filename = basename(path);
-          let message: InboxMessage;
-          try {
-            message = JSON.parse(readFileSync(path, "utf8")) as InboxMessage;
-            if (!message.id || !message.customType || !message.content)
-              throw new Error("missing required inbox message fields");
-          } catch (error) {
-            console.error(
-              `foreman-lite inbox rejected ${path}: ${String(error)}`,
-            );
-            writeJsonAtomic(join(failedDir(paneId), filename), {
-              failedAt: Date.now(),
-              error: String(error),
-            });
-            continue;
-          }
-
-          try {
-            pi.sendMessage(
-              {
-                customType: message.customType,
-                content: message.content,
-                display: true,
-                details: message.details,
-              },
-              {
-                triggerTurn: message.triggerTurn,
-                deliverAs: message.deliverAs,
-              },
-            );
-            writeJsonAtomic(join(deliveredDir(paneId), filename), {
-              messageId: message.id,
-              sessionOwner: ownerToken,
-              deliveredAt: Date.now(),
-            });
-          } catch (error) {
-            console.error(
-              `foreman-lite inbox delivery failed: ${String(error)}`,
-            );
-            return;
-          }
-        }
-      } while (drainAgain);
-    } finally {
-      draining = false;
+      message = JSON.parse(readFileSync(path, "utf8")) as InboxMessage;
+      if (!message.id || !message.customType || !message.content)
+        throw new Error("missing required inbox message fields");
+    } catch (error) {
+      console.error(`foreman-lite inbox rejected ${path}: ${String(error)}`);
+      writeJsonAtomic(join(failedDir(paneId), filename), {
+        failedAt: Date.now(),
+        error: String(error),
+      });
+      continue;
     }
-  };
-
-  const stop = (): void => {
-    watcher?.close();
-    watcher = undefined;
-    if (poller) clearInterval(poller);
-    poller = undefined;
-    if (ownsInbox()) rmSync(ownerPath(paneId), { force: true });
-    ownerToken = undefined;
-  };
-
-  pi.on("session_start", (_event, ctx) => {
-    stop();
-    ownerToken = `${ctx.sessionManager.getSessionId()}:${process.pid}:${randomUUID()}`;
-    writeJsonAtomic(ownerPath(paneId), {
-      token: ownerToken,
-      sessionId: ctx.sessionManager.getSessionId(),
-      sessionFile: ctx.sessionManager.getSessionFile(),
-      pid: process.pid,
-      claimedAt: Date.now(),
-    });
-    mkdirSync(messagesDir(paneId), { recursive: true });
 
     try {
-      watcher = watch(messagesDir(paneId), () => void drain());
-      watcher.on("error", (error) => {
-        console.error(`foreman-lite inbox watch failed: ${String(error)}`);
-        watcher?.close();
-        watcher = undefined;
+      pi.sendMessage(
+        {
+          customType: message.customType,
+          content: message.content,
+          display: true,
+          details: message.details,
+        },
+        {
+          triggerTurn: message.triggerTurn,
+          deliverAs: message.deliverAs,
+        },
+      );
+      writeJsonAtomic(join(deliveredDir(paneId), filename), {
+        messageId: message.id,
+        sessionOwner: ownerToken,
+        deliveredAt: Date.now(),
       });
     } catch (error) {
-      console.error(`foreman-lite inbox watch unavailable: ${String(error)}`);
+      console.error(`foreman-lite inbox delivery failed: ${String(error)}`);
+      return;
     }
+  }
+};
 
-    poller = setInterval(() => void drain(), 1_000);
-    poller.unref();
-    void drain();
+const watchMessages = (
+  paneId: string,
+  deliver: () => void,
+): FSWatcher | undefined => {
+  try {
+    const watcher = watch(messagesDir(paneId), deliver);
+    watcher.on("error", (error) => {
+      console.error(`foreman-lite inbox watch failed: ${String(error)}`);
+      watcher.close();
+    });
+    return watcher;
+  } catch (error) {
+    console.error(`foreman-lite inbox watch unavailable: ${String(error)}`);
+    return undefined;
+  }
+};
+
+const startInboxSession = (
+  pi: ExtensionAPI,
+  paneId: string,
+  session: { id: string; file: string | undefined },
+): (() => void) => {
+  const ownerToken = `${session.id}:${process.pid}:${randomUUID()}`;
+  writeJsonAtomic(ownerPath(paneId), {
+    token: ownerToken,
+    sessionId: session.id,
+    sessionFile: session.file,
+    pid: process.pid,
+    claimedAt: Date.now(),
+  });
+  mkdirSync(messagesDir(paneId), { recursive: true });
+
+  const deliver = (): void => deliverMessages(pi, paneId, ownerToken);
+  const watcher = watchMessages(paneId, deliver);
+  const poller = setInterval(deliver, 1_000);
+  poller.unref();
+  deliver();
+
+  return () => {
+    watcher?.close();
+    clearInterval(poller);
+    if (readOwner(paneId) === ownerToken)
+      rmSync(ownerPath(paneId), { force: true });
+  };
+};
+
+export const registerInbox = (
+  pi: ExtensionAPI,
+  paneId: string | undefined,
+): void => {
+  if (!paneId) return;
+
+  let stopCurrent = (): void => {};
+
+  pi.on("session_start", (_event, ctx) => {
+    stopCurrent();
+    stopCurrent = startInboxSession(pi, paneId, {
+      id: ctx.sessionManager.getSessionId(),
+      file: ctx.sessionManager.getSessionFile(),
+    });
   });
 
-  pi.on("session_shutdown", stop);
+  pi.on("session_shutdown", () => {
+    stopCurrent();
+    stopCurrent = (): void => {};
+  });
 };
