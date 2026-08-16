@@ -1,6 +1,6 @@
 # Testability refactor and test backfill
 
-**Status:** planned; not implemented
+**Status:** implemented 2026-08-10; retain until the suite has proved stable enough to archive
 **Why now:** the Foreman-judgment redesign is live-validated, but its regression evidence is mostly manual. Transport, lifecycle, and command construction are deterministic mechanics and should fail quickly in local tests rather than during orchestration.
 **Shelf life:** keep until the suite covers the mechanics below; then convert remaining gaps into ordinary issues and archive this plan.
 

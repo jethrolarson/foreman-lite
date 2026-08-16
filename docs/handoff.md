@@ -15,8 +15,9 @@ The redesign now encodes mechanics rather than a fixed PR workflow:
   - Provides `message_worker` through the structured inbox.
   - Starts or reuses a persistent Verifier with arbitrary contextual review criteria.
   - Retains `halt_worker` and human OS `flag`.
-- `extensions/inbox.ts`
-  - Owns one inbox per Herdr pane/session.
+- `extensions/inboxProtocol.ts` and `extensions/inbox.ts`
+  - Separate the durable filesystem protocol from Pi session/watch/poll lifecycle mechanics.
+  - Own one inbox per Herdr pane/session.
   - Processes queued files at session start.
   - Uses `fs.watch` plus polling.
   - Keeps immutable messages and writes a `delivered/` receipt only after Pi `sendMessage()` accepts them.
@@ -42,6 +43,8 @@ The redesign now encodes mechanics rather than a fixed PR workflow:
 │   └── events.jsonl
 ├── inboxes/<encoded-pane-id>/
 │   ├── owner.json
+│   ├── owners/<token>.json
+│   ├── delivering/
 │   ├── messages/
 │   ├── delivered/
 │   └── failed/
@@ -49,7 +52,7 @@ The redesign now encodes mechanics rather than a fixed PR workflow:
 └── worktrees/
 ```
 
-Task records contain discriminated placement metadata, workspace/tab/pane IDs, and optional Verifier pane ID. They do not require branch, PR, or worktree fields.
+Task records contain discriminated placement metadata, workspace/tab/pane IDs, and optional Verifier pane ID. They do not require branch, PR, or worktree fields. `owner.json` selects a session token while `owners/<token>.json` proves the claim is live, so stale shutdown cannot unlink a newer claim. Atomic `delivering/` leases plus ownership revalidation while the lease is held serialize synchronous send/receipt authority across session takeover; leases are reclaimed when their recorded process is dead.
 
 ## Live validation evidence
 
