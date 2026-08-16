@@ -7,8 +7,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "tsc --noEmit",
-    "format": "prettier --write \"extensions/**/*.ts\" \"plugins/**/*.mjs\"",
-    "format:check": "prettier --check \"extensions/**/*.ts\" \"plugins/**/*.mjs\""
+    "format": "prettier --write \"extensions/**/*.ts\" \"plugins/**/*.mjs\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"extensions/**/*.ts\" \"plugins/**/*.mjs\" \"tests/**/*.ts\""
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.1",

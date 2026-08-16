@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { renameForemanTabAtStartup } from "./foremanStartup.js";
 import { queueInboxMessage, registerInbox } from "./inbox.js";
 import {
   addWorktreeCommand,
@@ -664,6 +665,27 @@ export const createForemanExtension =
     pi.registerTool(haltWorkerTool(dependencies));
     pi.registerTool(flagTool(dependencies));
     registerInbox(pi, process.env.HERDR_PANE_ID);
+
+    pi.on("session_start", (event, ctx) => {
+      const renamed = renameForemanTabAtStartup({
+        reason: event.reason,
+        tabId: process.env.HERDR_TAB_ID,
+        rename: (tabId, label) => {
+          const result = dependencies.commands.run("herdr", [
+            "tab",
+            "rename",
+            tabId,
+            label,
+          ]);
+          return result.ok ? { ok: true } : { ok: false, error: result.error };
+        },
+      });
+      if (renamed.kind === "failed")
+        ctx.ui.notify(
+          `Could not rename the Herdr tab to Foreman: ${renamed.message}`,
+          "warning",
+        );
+    });
 
     pi.on("before_agent_start", (event) => ({
       systemPrompt: `${event.systemPrompt}\n\n${FOREMAN_ROLE_PROMPT}`,
