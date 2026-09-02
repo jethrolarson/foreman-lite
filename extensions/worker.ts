@@ -157,11 +157,10 @@ export default function (pi: ExtensionAPI) {
   // unreachable (verified: caused an infinite nag loop in dogfooding).
   // Reset only when a signal is actually called (new work cycle).
   let nagCount = 0;
-  // runOrigin needs to know which run is the prompt vs. later interactive input.
   let sawFirstRun = false;
 
   pi.on("agent_end", (event) => {
-    const firstRun = !sawFirstRun;
+    const isSessionsFirstRun = !sawFirstRun;
     sawFirstRun = true;
 
     if (
@@ -175,13 +174,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Advise, don't force: a forced signal after a human's pane question
-    // reaches Foreman as real task state.
-    if (runOrigin(event.messages, firstRun) === "human") {
+    if (runOrigin(event.messages, isSessionsFirstRun) === "human") {
       pi.sendMessage(
         {
           customType: "worker-signal-reminder",
-          content: `Ended without ${SIGNAL_TOOL_NAME}. If a lifecycle transition happened (plan ready, result ready, blocked), call planned/done/flag. If you were just answering an attached human, no signal is needed.`,
+          content: `Ended without ${SIGNAL_TOOL_NAME}. If a lifecycle transition happened (plan ready, result ready, blocked), call planned/done/flag. If you were only answering an attached human, no signal is needed.`,
           display: true,
         },
         { triggerTurn: false },

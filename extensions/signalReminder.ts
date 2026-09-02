@@ -1,25 +1,31 @@
-// Worker/Verifier enforce "end a task turn with a signal" by nagging on
-// `agent_end`. `runOrigin` keeps the nag off turns where an attached human just
-// asked a question: forcing a signal there emits a spurious lifecycle event
-// that the task-events plugin routes to Foreman as real state.
+// Why the turn-end nag is origin-aware: an attached human asking a question is
+// a signal-less turn too, and a forced signal there reaches Foreman as real
+// task state through the task-events plugin.
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 export type RunOrigin = "task" | "human";
 
-const startsARun = (message: AgentMessage): boolean =>
+const isRunInitiator = (message: AgentMessage): boolean =>
   message.role === "user" || message.role === "custom";
 
-// `custom` initiator ⇒ a Foreman inbox directive or a prior forcing reminder:
-// task work either way. A bare `user` initiator is the task prompt only on the
-// session's first run (`agent_end.messages` is this run alone, so a later human
-// question is otherwise indistinguishable from the prompt).
+// Run-starting messages foreman-lite injects (inbox directives, the turn-end
+// reminder) carry role "custom"; a "user" initiator was typed.
+const isSystemInjected = (initiator: AgentMessage): boolean =>
+  initiator.role === "custom";
+
+const typedRunOrigin = (isSessionsFirstRun: boolean): RunOrigin =>
+  isSessionsFirstRun ? "task" : "human";
+
+// `messages` is one run's messages, not session history (pi returns
+// `newMessages` from the loop), so the caller tracks which run is the first.
 export const runOrigin = (
   messages: AgentMessage[],
-  firstRunOfSession: boolean,
+  isSessionsFirstRun: boolean,
 ): RunOrigin => {
-  const initiator = messages.find(startsARun);
+  const initiator = messages.find(isRunInitiator);
   if (!initiator) return "task";
-  if (initiator.role === "custom") return "task";
-  return firstRunOfSession ? "task" : "human";
+  return isSystemInjected(initiator)
+    ? "task"
+    : typedRunOrigin(isSessionsFirstRun);
 };

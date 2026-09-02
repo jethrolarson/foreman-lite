@@ -128,11 +128,10 @@ export default function (pi: ExtensionAPI) {
   // settle silently. Don't reset nagCount on agent_start — the nag's own
   // followUp triggers one, which would defeat the bound.
   let nagCount = 0;
-  // runOrigin needs to know which run is the prompt vs. later interactive input.
   let sawFirstRun = false;
 
   pi.on("agent_end", (event) => {
-    const firstRun = !sawFirstRun;
+    const isSessionsFirstRun = !sawFirstRun;
     sawFirstRun = true;
 
     if (
@@ -145,13 +144,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Advise, don't force: a forced verdict after a human's pane question
-    // reaches Foreman as a real verdict.
-    if (runOrigin(event.messages, firstRun) === "human") {
+    if (runOrigin(event.messages, isSessionsFirstRun) === "human") {
       pi.sendMessage(
         {
           customType: "verifier-signal-reminder",
-          content: `Ended without ${SIGNAL_TOOL_NAME}. If you reached a verdict, call approve/deny/flag. If you were just answering an attached human, no signal is needed.`,
+          content: `Ended without ${SIGNAL_TOOL_NAME}. If you reached a verdict, call approve/deny/flag. If you were only answering an attached human, no signal is needed.`,
           display: true,
         },
         { triggerTurn: false },
