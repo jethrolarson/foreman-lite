@@ -128,8 +128,7 @@ export default function (pi: ExtensionAPI) {
   // settle silently. Don't reset nagCount on agent_start — the nag's own
   // followUp triggers one, which would defeat the bound.
   let nagCount = 0;
-  // The session's first run is the verification prompt (a plain user message,
-  // like later interactive input); the latch lets runOrigin tell them apart.
+  // runOrigin needs to know which run is the prompt vs. later interactive input.
   let sawFirstRun = false;
 
   pi.on("agent_end", (event) => {
@@ -146,9 +145,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // A human attached to the pane and asked something directly. Forcing a
-    // verdict here makes the Verifier post a spurious approve/deny that the
-    // task-events plugin routes to Foreman as a real verdict. Advise, don't drive.
+    // Advise, don't force: a forced verdict after a human's pane question
+    // reaches Foreman as a real verdict.
     if (runOrigin(event.messages, firstRun) === "human") {
       pi.sendMessage(
         {

@@ -157,8 +157,7 @@ export default function (pi: ExtensionAPI) {
   // unreachable (verified: caused an infinite nag loop in dogfooding).
   // Reset only when a signal is actually called (new work cycle).
   let nagCount = 0;
-  // The session's first run is the task prompt (a plain user message, like
-  // later interactive input); the latch lets runOrigin tell them apart.
+  // runOrigin needs to know which run is the prompt vs. later interactive input.
   let sawFirstRun = false;
 
   pi.on("agent_end", (event) => {
@@ -176,9 +175,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // A human attached to the pane and asked something directly. Forcing a
-    // signal here makes the Worker post a spurious lifecycle event that the
-    // task-events plugin routes to Foreman as real state. Advise, don't drive.
+    // Advise, don't force: a forced signal after a human's pane question
+    // reaches Foreman as real task state.
     if (runOrigin(event.messages, firstRun) === "human") {
       pi.sendMessage(
         {
