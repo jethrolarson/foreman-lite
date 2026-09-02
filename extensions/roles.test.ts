@@ -126,6 +126,31 @@ describe.each([
       ).toHaveLength(4);
       expect(state.sent.at(-1)?.options?.triggerTurn).toBe(false);
     });
+
+    it("advises without forcing a turn when an attached human asked the question", () => {
+      process.env.FOREMAN_TASK_ID = "task";
+      const state = fakePi();
+      extension(state.pi);
+      const end = state.handlers.get("agent_end");
+      const user = (text: string) => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      });
+
+      // First run is the task prompt: an omitted signal is still forced.
+      end?.({ messages: [user("do the task"), assistant("stop")] } as never);
+      // Later run started by a human typing into the attached pane.
+      end?.({
+        messages: [user("why this approach?"), assistant("stop")],
+      } as never);
+
+      expect(
+        state.sent.filter(({ options }) => options?.triggerTurn),
+      ).toHaveLength(1);
+      const last = state.sent.at(-1);
+      expect(last?.options?.triggerTurn).toBe(false);
+      expect(last?.message.customType).toContain("signal-reminder");
+    });
   },
 );
 

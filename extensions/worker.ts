@@ -21,6 +21,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
+import { runOrigin } from "./signalReminder.js";
 import { taskEventsPath, taskIdFromEnvironment } from "./taskState.js";
 
 type WorkerAction = "planned" | "done" | "flag";
@@ -156,8 +157,14 @@ export default function (pi: ExtensionAPI) {
   // unreachable (verified: caused an infinite nag loop in dogfooding).
   // Reset only when a signal is actually called (new work cycle).
   let nagCount = 0;
+  // The session's first run is the task prompt (a plain user message, like
+  // later interactive input); the latch lets runOrigin tell them apart.
+  let sawFirstRun = false;
 
   pi.on("agent_end", (event) => {
+    const firstRun = !sawFirstRun;
+    sawFirstRun = true;
+
     if (
       calledWorkerSignal(event.messages) ||
       workerEndedWithModelFailure(event.messages)
@@ -166,6 +173,21 @@ export default function (pi: ExtensionAPI) {
       // signal. A corrective turn would retry a failed or intentionally aborted
       // operation instead of respecting the halt.
       nagCount = 0;
+      return;
+    }
+
+    // A human attached to the pane and asked something directly. Forcing a
+    // signal here makes the Worker post a spurious lifecycle event that the
+    // task-events plugin routes to Foreman as real state. Advise, don't drive.
+    if (runOrigin(event.messages, firstRun) === "human") {
+      pi.sendMessage(
+        {
+          customType: "worker-signal-reminder",
+          content: `Ended without ${SIGNAL_TOOL_NAME}. If a lifecycle transition happened (plan ready, result ready, blocked), call planned/done/flag. If you were just answering an attached human, no signal is needed.`,
+          display: true,
+        },
+        { triggerTurn: false },
+      );
       return;
     }
 

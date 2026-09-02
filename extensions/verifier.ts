@@ -19,6 +19,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
+import { runOrigin } from "./signalReminder.js";
 import { taskEventsPath, taskIdFromEnvironment } from "./taskState.js";
 
 type VerifierAction = "approve" | "deny" | "flag";
@@ -127,8 +128,14 @@ export default function (pi: ExtensionAPI) {
   // settle silently. Don't reset nagCount on agent_start — the nag's own
   // followUp triggers one, which would defeat the bound.
   let nagCount = 0;
+  // The session's first run is the verification prompt (a plain user message,
+  // like later interactive input); the latch lets runOrigin tell them apart.
+  let sawFirstRun = false;
 
   pi.on("agent_end", (event) => {
+    const firstRun = !sawFirstRun;
+    sawFirstRun = true;
+
     if (
       calledVerifierSignal(event.messages) ||
       verifierEndedWithModelFailure(event.messages)
@@ -136,6 +143,21 @@ export default function (pi: ExtensionAPI) {
       // Provider/model errors and explicit halts aren't behavioral omissions;
       // corrective turns only repeat a failed or intentionally aborted request.
       nagCount = 0;
+      return;
+    }
+
+    // A human attached to the pane and asked something directly. Forcing a
+    // verdict here makes the Verifier post a spurious approve/deny that the
+    // task-events plugin routes to Foreman as a real verdict. Advise, don't drive.
+    if (runOrigin(event.messages, firstRun) === "human") {
+      pi.sendMessage(
+        {
+          customType: "verifier-signal-reminder",
+          content: `Ended without ${SIGNAL_TOOL_NAME}. If you reached a verdict, call approve/deny/flag. If you were just answering an attached human, no signal is needed.`,
+          display: true,
+        },
+        { triggerTurn: false },
+      );
       return;
     }
 
