@@ -48,9 +48,10 @@ initial prompt arrives as a `custom` message, so the latch only has to catch
 that one case.
 
 On `human` origin the extensions send a non-forcing advisory
-(`triggerTurn: false`) instead of the forcing nag, and `roles/worker.md` /
-`roles/verifier.md` gain a "do not signal after merely answering an attached
-human" directive so the model self-regulates too.
+(`triggerTurn: false`) instead of the forcing nag. `roles/worker.md` /
+`roles/verifier.md` gain a CONTEXT note that the reminder can fire after
+answering an attached human and a signal belongs there only if lifecycle
+actually moved — informational, so the role still judges the specific case.
 
 ## Known limits
 
