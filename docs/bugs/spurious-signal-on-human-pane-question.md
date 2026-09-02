@@ -48,10 +48,11 @@ initial prompt arrives as a `custom` message, so the latch only has to catch
 that one case.
 
 On `human` origin the extensions send a non-forcing advisory
-(`triggerTurn: false`) instead of the forcing nag. `roles/worker.md` /
-`roles/verifier.md` gain a CONTEXT note that the reminder can fire after
-answering an attached human and a signal belongs there only if lifecycle
-actually moved — informational, so the role still judges the specific case.
+(`triggerTurn: false`) instead of the forcing nag — the model is no longer
+driven toward a signal, so no role-prompt directive is needed. In the captured
+session every spurious signal followed a `*-signal-reminder`; none was
+volunteered. If unprompted post-question signaling ever shows up, add a role
+directive then, with that provenance.
 
 ## Known limits
 
