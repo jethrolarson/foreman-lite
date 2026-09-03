@@ -157,11 +157,19 @@ export default function (pi: ExtensionAPI) {
   // unreachable (verified: caused an infinite nag loop in dogfooding).
   // Reset only when a signal is actually called (new work cycle).
   let nagCount = 0;
-  let sawFirstRun = false;
+
+  // Only a "startup" session has the launch prompt still ahead of it. /reload
+  // and compaction re-run this file mid-session (reason "reload"); resume/fork
+  // reopen prior history — in all of those the prompt run is already behind us,
+  // so its enforcement must not re-arm and nag a later human question.
+  let launchPromptRunPending = false;
+  pi.on("session_start", (event) => {
+    launchPromptRunPending = event.reason === "startup";
+  });
 
   pi.on("agent_end", (event) => {
-    const isSessionsFirstRun = !sawFirstRun;
-    sawFirstRun = true;
+    const isLaunchPromptRun = launchPromptRunPending;
+    launchPromptRunPending = false;
 
     if (
       calledWorkerSignal(event.messages) ||
@@ -177,7 +185,7 @@ export default function (pi: ExtensionAPI) {
     // A human typed into the pane and the agent answered. Nothing to enforce:
     // the role prompt already says to signal a real transition, and a reminder
     // here would only reach the attached human as noise.
-    if (runOrigin(event.messages, isSessionsFirstRun) === "human") return;
+    if (runOrigin(event.messages, isLaunchPromptRun) === "human") return;
 
     if (nagCount >= MAX_NAGS_PER_RUN) {
       pi.sendMessage(

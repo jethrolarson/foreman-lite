@@ -14,18 +14,19 @@ const isRunInitiator = (message: AgentMessage): boolean =>
 const isSystemInjected = (initiator: AgentMessage): boolean =>
   initiator.role === "custom";
 
-const typedRunOrigin = (isSessionsFirstRun: boolean): RunOrigin =>
-  isSessionsFirstRun ? "task" : "human";
+const typedRunOrigin = (isLaunchPromptRun: boolean): RunOrigin =>
+  isLaunchPromptRun ? "task" : "human";
 
 // `messages` is one run's messages, not session history (pi returns
-// `newMessages` from the loop), so the caller tracks which run is the first.
+// `newMessages` from the loop), so the caller tracks whether this run is the
+// one that consumed the `@promptFile` launch argument.
 export const runOrigin = (
   messages: AgentMessage[],
-  isSessionsFirstRun: boolean,
+  isLaunchPromptRun: boolean,
 ): RunOrigin => {
   const initiator = messages.find(isRunInitiator);
   if (!initiator) return "task";
   return isSystemInjected(initiator)
     ? "task"
-    : typedRunOrigin(isSessionsFirstRun);
+    : typedRunOrigin(isLaunchPromptRun);
 };
