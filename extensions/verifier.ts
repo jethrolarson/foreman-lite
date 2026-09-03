@@ -19,6 +19,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
+import { runOrigin } from "./signalReminder.js";
 import { taskEventsPath, taskIdFromEnvironment } from "./taskState.js";
 
 type VerifierAction = "approve" | "deny" | "flag";
@@ -128,7 +129,19 @@ export default function (pi: ExtensionAPI) {
   // followUp triggers one, which would defeat the bound.
   let nagCount = 0;
 
+  // Only a "startup" session has the launch prompt still ahead of it. /reload
+  // and compaction re-run this file mid-session (reason "reload"); resume/fork
+  // reopen prior history — in all of those the prompt run is already behind us,
+  // so its enforcement must not re-arm and nag a later human question.
+  let launchPromptRunPending = false;
+  pi.on("session_start", (event) => {
+    launchPromptRunPending = event.reason === "startup";
+  });
+
   pi.on("agent_end", (event) => {
+    const isLaunchPromptRun = launchPromptRunPending;
+    launchPromptRunPending = false;
+
     if (
       calledVerifierSignal(event.messages) ||
       verifierEndedWithModelFailure(event.messages)
@@ -138,6 +151,11 @@ export default function (pi: ExtensionAPI) {
       nagCount = 0;
       return;
     }
+
+    // A human typed into the pane and the agent answered. Nothing to enforce:
+    // the role prompt already says to signal a real verdict, and a reminder
+    // here would only reach the attached human as noise.
+    if (runOrigin(event.messages, isLaunchPromptRun) === "human") return;
 
     if (nagCount >= MAX_NAGS_PER_RUN) {
       pi.sendMessage(
