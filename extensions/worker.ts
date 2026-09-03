@@ -174,17 +174,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (runOrigin(event.messages, isSessionsFirstRun) === "human") {
-      pi.sendMessage(
-        {
-          customType: "worker-signal-reminder",
-          content: `Ended without ${SIGNAL_TOOL_NAME}. If a lifecycle transition happened (plan ready, result ready, blocked), call planned/done/flag. If you were only answering an attached human, no signal is needed.`,
-          display: true,
-        },
-        { triggerTurn: false },
-      );
-      return;
-    }
+    // A human typed into the pane and the agent answered. Nothing to enforce:
+    // the role prompt already says to signal a real transition, and a reminder
+    // here would only reach the attached human as noise.
+    if (runOrigin(event.messages, isSessionsFirstRun) === "human") return;
 
     if (nagCount >= MAX_NAGS_PER_RUN) {
       pi.sendMessage(

@@ -144,17 +144,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (runOrigin(event.messages, isSessionsFirstRun) === "human") {
-      pi.sendMessage(
-        {
-          customType: "verifier-signal-reminder",
-          content: `Ended without ${SIGNAL_TOOL_NAME}. If you reached a verdict, call approve/deny/flag. If you were only answering an attached human, no signal is needed.`,
-          display: true,
-        },
-        { triggerTurn: false },
-      );
-      return;
-    }
+    // A human typed into the pane and the agent answered. Nothing to enforce:
+    // the role prompt already says to signal a real verdict, and a reminder
+    // here would only reach the attached human as noise.
+    if (runOrigin(event.messages, isSessionsFirstRun) === "human") return;
 
     if (nagCount >= MAX_NAGS_PER_RUN) {
       pi.sendMessage(

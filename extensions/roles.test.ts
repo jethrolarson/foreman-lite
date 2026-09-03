@@ -127,7 +127,7 @@ describe.each([
       expect(state.sent.at(-1)?.options?.triggerTurn).toBe(false);
     });
 
-    it("advises without forcing a turn when an attached human asked the question", () => {
+    it("stays silent when an attached human, not the task, started the run", () => {
       process.env.FOREMAN_TASK_ID = "task";
       const state = fakePi();
       extension(state.pi);
@@ -147,9 +147,7 @@ describe.each([
       expect(
         state.sent.filter(({ options }) => options?.triggerTurn),
       ).toHaveLength(1);
-      const last = state.sent.at(-1);
-      expect(last?.options?.triggerTurn).toBe(false);
-      expect(last?.message.customType).toContain("signal-reminder");
+      expect(state.sent).toHaveLength(1);
     });
   },
 );
