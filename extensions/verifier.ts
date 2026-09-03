@@ -128,11 +128,19 @@ export default function (pi: ExtensionAPI) {
   // settle silently. Don't reset nagCount on agent_start — the nag's own
   // followUp triggers one, which would defeat the bound.
   let nagCount = 0;
-  let sawFirstRun = false;
+
+  // Only a "startup" session has the launch prompt still ahead of it. /reload
+  // and compaction re-run this file mid-session (reason "reload"); resume/fork
+  // reopen prior history — in all of those the prompt run is already behind us,
+  // so its enforcement must not re-arm and nag a later human question.
+  let launchPromptRunPending = false;
+  pi.on("session_start", (event) => {
+    launchPromptRunPending = event.reason === "startup";
+  });
 
   pi.on("agent_end", (event) => {
-    const isSessionsFirstRun = !sawFirstRun;
-    sawFirstRun = true;
+    const isLaunchPromptRun = launchPromptRunPending;
+    launchPromptRunPending = false;
 
     if (
       calledVerifierSignal(event.messages) ||
@@ -147,7 +155,7 @@ export default function (pi: ExtensionAPI) {
     // A human typed into the pane and the agent answered. Nothing to enforce:
     // the role prompt already says to signal a real verdict, and a reminder
     // here would only reach the attached human as noise.
-    if (runOrigin(event.messages, isSessionsFirstRun) === "human") return;
+    if (runOrigin(event.messages, isLaunchPromptRun) === "human") return;
 
     if (nagCount >= MAX_NAGS_PER_RUN) {
       pi.sendMessage(

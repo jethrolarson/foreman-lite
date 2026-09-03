@@ -131,13 +131,15 @@ describe.each([
       process.env.FOREMAN_TASK_ID = "task";
       const state = fakePi();
       extension(state.pi);
+      const start = state.handlers.get("session_start");
       const end = state.handlers.get("agent_end");
       const user = (text: string) => ({
         role: "user",
         content: [{ type: "text", text }],
       });
 
-      // First run is the task prompt: an omitted signal is still forced.
+      start?.({ reason: "startup" } as never);
+      // The launch-prompt run: an omitted signal is still forced.
       end?.({ messages: [user("do the task"), assistant("stop")] } as never);
       // Later run started by a human typing into the attached pane.
       end?.({
@@ -148,6 +150,30 @@ describe.each([
         state.sent.filter(({ options }) => options?.triggerTurn),
       ).toHaveLength(1);
       expect(state.sent).toHaveLength(1);
+    });
+
+    it("does not re-arm launch-prompt enforcement after a /reload", () => {
+      process.env.FOREMAN_TASK_ID = "task";
+      const state = fakePi();
+      extension(state.pi);
+      const start = state.handlers.get("session_start");
+      const end = state.handlers.get("agent_end");
+      const user = (text: string) => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      });
+
+      start?.({ reason: "startup" } as never);
+      end?.({
+        messages: [user("do the task"), assistant("stop", signalName)],
+      } as never);
+      // /reload re-runs the extension mid-session; the prompt run is behind us.
+      start?.({ reason: "reload" } as never);
+      end?.({
+        messages: [user("quick question?"), assistant("stop")],
+      } as never);
+
+      expect(state.sent).toHaveLength(0);
     });
   },
 );
