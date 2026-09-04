@@ -187,6 +187,7 @@ describe("Foreman extension authority", () => {
       "message_worker",
       "start_verifier",
       "halt_worker",
+      "recover_task",
       "flag",
     ]);
     const result = state.handlers.get("before_agent_start")?.({

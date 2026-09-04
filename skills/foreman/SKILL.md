@@ -16,7 +16,7 @@ A Task Thread is a semantic unit represented by one Herdr tab, one persistent Wo
 
 | Role | Extension | Tools |
 | --- | --- | --- |
-| Foreman | `extensions/foreman.ts` | `create_task`, `message_worker`, `start_verifier`, `halt_worker`, `flag` |
+| Foreman | `extensions/foreman.ts` | `create_task`, `message_worker`, `start_verifier`, `halt_worker`, `recover_task`, `flag` |
 | Worker | `extensions/worker.ts` | `worker_signal` |
 | Verifier | `extensions/verifier.ts` | `verifier_signal` |
 
@@ -38,11 +38,27 @@ HAZARD: do not use `herdr agent prompt` for automated routing. REASON: it types 
 ## Durable state and compaction recovery
 
 - `~/.foreman/registry.json`: pane-id map used by the Herdr plugin. Entries identify task, role, workspace, tab, Worker/Verifier panes, placement, and Foreman pane.
-- `~/.foreman/tasks/<id>/meta.json`: canonical Task Thread record.
+- `~/.foreman/tasks/<id>/meta.json`: canonical Task Thread record, including `workerSessionId` and `verifierSessionId` — the pi project session ids used to resume a child with its full transcript.
 - `~/.foreman/tasks/<id>/events.jsonl`: append-only Worker and Verifier signals `{role, action, context, timestamp}`.
 - `~/.foreman/inboxes/<encoded-pane-id>/`: immutable messages, delivered/failed receipts, and current session-owner state.
 
 HAZARD: compaction can remove conversational task detail while disk state remains authoritative. REASON: guessing after compaction can route an old signal as current. Recover by reading `registry.json`, each task's `meta.json`, and the last relevant lines of `events.jsonl`.
+
+## Child session recovery
+
+Distinct from compaction recovery: here the child pi *processes* are gone (Foreman restarted, a Worker crashed, the machine rebooted) while `~/.foreman` and the pi session files under `~/.pi/agent/sessions/` survive.
+
+`recover_task` rebootstraps children for one task, or every task on disk when `id` is omitted. Per child it:
+
+- leaves a child alone if its pane is still in `herdr agent list` (already live);
+- otherwise, if the pane still exists, relaunches pi in place with `--session-id <stored>` so the child resumes its full transcript, then queues a re-orientation directive telling it to re-read its working surface and re-signal current status;
+- otherwise (Worker pane gone) recreates the task tab and resumes the Worker session into the new pane. A missing Verifier pane is not recreated — call `start_verifier` again.
+
+HAZARD: `recover_task` aborts if `herdr agent list` fails. REASON: without a liveness read it cannot tell a running child from a dead one, and relaunching pi into a pane that already holds a live pi would double the agent.
+
+HAZARD: a fresh Worker launch from the prompt file (what `create_task` does) discards all prior progress. REASON: the work lives in the pi session tree, not the prompt. Recovery must resume by session id, never re-prompt.
+
+CONTEXT: at startup Foreman notifies when Task Threads exist on disk, as a reminder to run `recover_task` after a restart.
 
 ## Herdr drill-in
 

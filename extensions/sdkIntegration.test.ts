@@ -85,6 +85,7 @@ describe("Pi public SDK extension integration", () => {
       "message_worker",
       "start_verifier",
       "halt_worker",
+      "recover_task",
       "flag",
     ]);
     process.env.FOREMAN_TASK_ID = "sdk-task";

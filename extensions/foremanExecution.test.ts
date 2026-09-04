@@ -74,6 +74,10 @@ const setup = (
     stateRoot,
     now: () => 100,
     newId: () => "fixed",
+    newSessionId: (() => {
+      let n = 0;
+      return () => `session-${++n}`;
+    })(),
     extensionPath: (role) => `/extensions/${role}.ts`,
     queueInbox: (paneId, message) => {
       queued.push({ paneId, message });
@@ -221,5 +225,107 @@ describe("Foreman execution through an injected command runner", () => {
     expect(() =>
       readFileSync(join(state.stateRoot, "tasks", id, "events.jsonl")),
     ).toThrow();
+  });
+});
+
+const readMeta = (state: ReturnType<typeof setup>, id: string) =>
+  JSON.parse(
+    readFileSync(join(state.stateRoot, "tasks", id, "meta.json"), "utf8"),
+  );
+
+const recoveryCommands =
+  (livePaneIds: string[], paneExists = true) =>
+  (
+    kind: "run" | "json",
+    _executable: string,
+    args: string[],
+  ): CommandResult<string | Record<string, unknown>> | undefined => {
+    const base = successfulCommands(kind, _executable, args);
+    if (base) return base;
+    if (kind === "json" && args[0] === "agent" && args[1] === "list")
+      return {
+        ok: true,
+        value: {
+          agents: livePaneIds.map((pane_id) => ({ pane_id })),
+        },
+      };
+    if (kind === "json" && args[0] === "pane" && args[1] === "get")
+      return paneExists
+        ? { ok: true, value: { pane: { pane_id: args[2] } } }
+        : fail("unknown pane");
+    return undefined;
+  };
+
+describe("Foreman child recovery", () => {
+  it("persists a worker session id and launches with --session-id", async () => {
+    const state = setup(successfulCommands);
+    const id = await createSharedTask(state);
+    const meta = readMeta(state, id);
+    expect(meta.workerSessionId).toBe("session-1");
+    const launch = state.calls.find(
+      ({ args }) => args[0] === "pane" && args[1] === "run",
+    );
+    expect(launch?.args[3]).toContain("--session-id");
+    expect(launch?.args[3]).toContain("session-1");
+    expect(launch?.args[3]).toContain("@");
+  });
+
+  it("leaves a live worker alone", async () => {
+    const state = setup(recoveryCommands(["worker-pane"]));
+    const id = await createSharedTask(state);
+    const before = state.calls.length;
+    const result = await state.execute("recover_task", { id });
+    expect(result.content[0].text).toContain("worker already-live");
+    expect(
+      state.calls
+        .slice(before)
+        .some(({ args }) => args[0] === "pane" && args[1] === "run"),
+    ).toBe(false);
+  });
+
+  it("resumes a dead worker in place without replaying the prompt", async () => {
+    const state = setup(recoveryCommands([]));
+    const id = await createSharedTask(state);
+    const before = state.calls.length;
+    const result = await state.execute("recover_task", { id });
+    expect(result.content[0].text).toContain("worker resumed-in-place");
+    const resume = state.calls
+      .slice(before)
+      .find(({ args }) => args[0] === "pane" && args[1] === "run");
+    expect(resume?.args[3]).toContain("--session-id");
+    expect(resume?.args[3]).not.toContain("@");
+    expect(state.queued.at(-1)).toMatchObject({
+      paneId: "worker-pane",
+      message: expect.objectContaining({
+        customType: "foreman-worker-directive",
+        details: { taskId: id, recovery: true },
+      }),
+    });
+  });
+
+  it("recreates the worker tab when the pane is gone", async () => {
+    const state = setup(recoveryCommands([], false));
+    const id = await createSharedTask(state);
+    const before = state.calls.length;
+    const result = await state.execute("recover_task", { id });
+    expect(result.content[0].text).toContain("worker recreated-tab");
+    expect(
+      state.calls
+        .slice(before)
+        .some(({ args }) => args[0] === "tab" && args[1] === "create"),
+    ).toBe(true);
+  });
+
+  it("fails cleanly when herdr liveness cannot be assessed", async () => {
+    const state = setup((kind, executable, args) => {
+      const base = successfulCommands(kind, executable, args);
+      if (base) return base;
+      if (args[0] === "agent" && args[1] === "list") return fail("herdr down");
+      return undefined;
+    });
+    const id = await createSharedTask(state);
+    const result = await state.execute("recover_task", { id });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("herdr agent list failed");
   });
 });

@@ -5,6 +5,7 @@ import {
   createTaskTabCommand,
   describeTabFailure,
   haltPaneCommand,
+  parseLiveAgentPanes,
   removeWorktreeCommand,
   resolveRepositoryCommand,
   runPaneCommand,
@@ -86,6 +87,37 @@ describe("Foreman command planning", () => {
       "worker-pane",
       command,
     ]);
+  });
+
+  it("passes --session-id on first launch and drops the prompt file on resume", () => {
+    const first = buildPiLaunchCommand(
+      "worker",
+      { id: "t1", name: "Build", sessionId: "sess-1" },
+      "/worker.ts",
+      "/prompt.txt",
+    );
+    expect(first).toContain("'--session-id' 'sess-1'");
+    expect(first).toContain("'@/prompt.txt'");
+
+    const resumed = buildPiLaunchCommand(
+      "worker",
+      { id: "t1", name: "Build", sessionId: "sess-1" },
+      "/worker.ts",
+      "",
+      { resume: true },
+    );
+    expect(resumed).toContain("'--session-id' 'sess-1'");
+    expect(resumed).not.toContain("@");
+  });
+
+  it("reads live agent pane ids from an agent list payload", () => {
+    expect(
+      parseLiveAgentPanes({
+        agents: [{ pane_id: "w:p1" }, { pane_id: "w:p2" }, { note: "no pane" }],
+      }),
+    ).toEqual(new Set(["w:p1", "w:p2"]));
+    expect(parseLiveAgentPanes(undefined)).toEqual(new Set());
+    expect(parseLiveAgentPanes({})).toEqual(new Set());
   });
 
   it("distinguishes first verification from reuse and targets halt by Worker pane", () => {

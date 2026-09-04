@@ -1,6 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,10 +17,13 @@ import { renameForemanTabAtStartup } from "./foremanStartup.js";
 import { queueInboxMessage, registerInbox } from "./inbox.js";
 import {
   addWorktreeCommand,
+  agentListCommand,
   buildPiLaunchCommand,
   createTaskTabCommand,
   describeTabFailure,
   haltPaneCommand,
+  paneGetCommand,
+  parseLiveAgentPanes,
   removeWorktreeCommand,
   resolveRepositoryCommand,
   runPaneCommand,
@@ -42,7 +51,9 @@ interface TaskRecord {
   workspaceId: string;
   tabId: string;
   workerPaneId: string;
+  workerSessionId: string;
   verifierPaneId?: string;
+  verifierSessionId?: string;
   foremanPaneId?: string;
   provider?: string;
   model?: string;
@@ -76,6 +87,7 @@ export interface ForemanDependencies {
   stateRoot: string;
   now: () => number;
   newId: () => string;
+  newSessionId: () => string;
   extensionPath: (role: "worker" | "verifier") => string;
   queueInbox: typeof queueInboxMessage;
 }
@@ -238,14 +250,18 @@ const writePromptFile = (
 const piCommand = (
   dependencies: ForemanDependencies,
   role: "worker" | "verifier",
-  record: Pick<TaskRecord, "id" | "name" | "provider" | "model">,
+  record: Pick<TaskRecord, "id" | "name" | "provider" | "model"> & {
+    sessionId?: string;
+  },
   promptFile: string,
+  options: { resume?: boolean } = {},
 ): string =>
   buildPiLaunchCommand(
     role,
     record,
     dependencies.extensionPath(role),
     promptFile,
+    options,
   );
 
 const createDetachedWorktree = (
@@ -306,15 +322,20 @@ const createTaskTab = (
 const startWorker = async (
   dependencies: ForemanDependencies,
   record: TaskRecord,
+  options: { resume?: boolean } = {},
 ): Promise<Result<void>> => {
-  const promptFile = writePromptFile(
-    dependencies.stateRoot,
-    record.id,
-    record.prompt,
-  );
+  const promptFile = options.resume
+    ? ""
+    : writePromptFile(dependencies.stateRoot, record.id, record.prompt);
   const command = runPaneCommand(
     record.workerPaneId,
-    piCommand(dependencies, "worker", record, promptFile),
+    piCommand(
+      dependencies,
+      "worker",
+      { ...record, sessionId: record.workerSessionId },
+      promptFile,
+      options,
+    ),
   );
   return runHerdrNoOutputRetryingPaneBusy(dependencies.commands, command.args);
 };
@@ -365,9 +386,15 @@ const startVerifier = async (
     `${record.id}-verifier`,
     verifierPrompt(record, context),
   );
+  const verifierSessionId = dependencies.newSessionId();
   const paneRun = runPaneCommand(
     paneId,
-    piCommand(dependencies, "verifier", record, promptFile),
+    piCommand(
+      dependencies,
+      "verifier",
+      { ...record, sessionId: verifierSessionId },
+      promptFile,
+    ),
   );
   const launched = await runHerdrNoOutputRetryingPaneBusy(
     dependencies.commands,
@@ -376,6 +403,7 @@ const startVerifier = async (
   if (!launched.ok) return launched;
 
   record.verifierPaneId = paneId;
+  record.verifierSessionId = verifierSessionId;
   writeTaskRecord(dependencies.stateRoot, record);
   writePaneRegistration(
     dependencies.stateRoot,
@@ -413,6 +441,184 @@ const sendOsNotification = (
     return sent.ok ? ok(undefined) : sent;
   }
   return fail(`no notifier for platform ${process.platform}`);
+};
+
+const listTaskIds = (stateRoot: string): string[] => {
+  try {
+    return readdirSync(join(stateRoot, "tasks"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((id) => readTaskRecord(stateRoot, id) !== undefined);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+};
+
+const recoveryDirective = (
+  role: "worker" | "verifier",
+  taskId: string,
+): Parameters<typeof queueInboxMessage>[1] => ({
+  customType: `foreman-${role}-directive`,
+  content:
+    `Your ${role} session for task ${taskId} was restarted by Foreman recovery. ` +
+    "The transcript is intact but the previous turn may have been interrupted. " +
+    "Re-read your working surface (files, PR, prior signals), then send a fresh " +
+    `${role === "worker" ? "worker_signal (planned/done/flag)" : "verifier_signal (approve/deny/flag)"} ` +
+    "reflecting current status before continuing.",
+  details: { taskId, recovery: true },
+  triggerTurn: true,
+  deliverAs: "steer",
+});
+
+interface RoleRecoveryOutcome {
+  role: "worker" | "verifier";
+  paneId: string;
+  action: "already-live" | "resumed-in-place" | "recreated-tab" | "failed";
+  detail?: string;
+}
+
+const resumeRoleInPane = async (
+  dependencies: ForemanDependencies,
+  record: TaskRecord,
+  role: "worker" | "verifier",
+  paneId: string,
+  sessionId: string,
+): Promise<Result<void>> => {
+  const command = runPaneCommand(
+    paneId,
+    piCommand(dependencies, role, { ...record, sessionId }, "", {
+      resume: true,
+    }),
+  );
+  const launched = await runHerdrNoOutputRetryingPaneBusy(
+    dependencies.commands,
+    command.args,
+  );
+  if (!launched.ok) return launched;
+  dependencies.queueInbox(paneId, recoveryDirective(role, record.id));
+  return ok(undefined);
+};
+
+const recoverRole = async (
+  dependencies: ForemanDependencies,
+  record: TaskRecord,
+  role: "worker" | "verifier",
+  paneId: string,
+  sessionId: string,
+  livePanes: ReadonlySet<string>,
+): Promise<RoleRecoveryOutcome> => {
+  if (livePanes.has(paneId)) return { role, paneId, action: "already-live" };
+
+  const paneCheck = paneGetCommand(paneId);
+  const paneExists = dependencies.commands.runJson(
+    paneCheck.executable,
+    paneCheck.args,
+  );
+  if (paneExists.ok) {
+    const resumed = await resumeRoleInPane(
+      dependencies,
+      record,
+      role,
+      paneId,
+      sessionId,
+    );
+    return resumed.ok
+      ? { role, paneId, action: "resumed-in-place" }
+      : { role, paneId, action: "failed", detail: resumed.error.message };
+  }
+
+  // A verifier whose pane is gone is recreated on demand through start_verifier;
+  // recovery only rebuilds the load-bearing Worker tab.
+  if (role === "verifier")
+    return {
+      role,
+      paneId,
+      action: "failed",
+      detail: "verifier pane is gone; call start_verifier to recreate it",
+    };
+
+  const tab = createTaskTab(
+    dependencies.commands,
+    record.workspaceId,
+    record.cwd,
+    record.id,
+  );
+  if (!tab.ok)
+    return {
+      role,
+      paneId,
+      action: "failed",
+      detail: `worker pane is gone and tab recreation failed: ${tab.error.message}`,
+    };
+  record.tabId = tab.value.tabId;
+  record.workerPaneId = tab.value.paneId;
+  const resumed = await resumeRoleInPane(
+    dependencies,
+    record,
+    role,
+    tab.value.paneId,
+    sessionId,
+  );
+  return resumed.ok
+    ? { role, paneId: tab.value.paneId, action: "recreated-tab" }
+    : {
+        role,
+        paneId: tab.value.paneId,
+        action: "failed",
+        detail: resumed.error.message,
+      };
+};
+
+const recoverTask = async (
+  dependencies: ForemanDependencies,
+  record: TaskRecord,
+): Promise<Result<{ id: string; roles: RoleRecoveryOutcome[] }>> => {
+  const list = agentListCommand();
+  const agents = dependencies.commands.runJson(list.executable, list.args);
+  if (!agents.ok)
+    return fail(
+      `cannot assess child liveness: herdr agent list failed: ${agents.error.message}`,
+    );
+  const livePanes = parseLiveAgentPanes(agents.value);
+
+  const roles: RoleRecoveryOutcome[] = [
+    await recoverRole(
+      dependencies,
+      record,
+      "worker",
+      record.workerPaneId,
+      record.workerSessionId,
+      livePanes,
+    ),
+  ];
+  if (record.verifierPaneId && record.verifierSessionId)
+    roles.push(
+      await recoverRole(
+        dependencies,
+        record,
+        "verifier",
+        record.verifierPaneId,
+        record.verifierSessionId,
+        livePanes,
+      ),
+    );
+
+  writeTaskRecord(dependencies.stateRoot, record);
+  writePaneRegistration(
+    dependencies.stateRoot,
+    record,
+    record.workerPaneId,
+    "worker",
+  );
+  if (record.verifierPaneId)
+    writePaneRegistration(
+      dependencies.stateRoot,
+      record,
+      record.verifierPaneId,
+      "verifier",
+    );
+  return ok({ id: record.id, roles });
 };
 
 const toolResult = (text: string, details?: unknown, isError?: boolean) => ({
@@ -499,6 +705,7 @@ const createTaskTool = (dependencies: ForemanDependencies) =>
         workspaceId,
         tabId: tab.value.tabId,
         workerPaneId: tab.value.paneId,
+        workerSessionId: dependencies.newSessionId(),
         foremanPaneId: process.env.HERDR_PANE_ID,
         provider: process.env.PI_PROVIDER,
         model: process.env.PI_MODEL,
@@ -627,6 +834,67 @@ const haltWorkerTool = (dependencies: ForemanDependencies) =>
     },
   });
 
+const describeRoleOutcome = (outcome: RoleRecoveryOutcome): string => {
+  const suffix = outcome.detail ? ` (${outcome.detail})` : "";
+  return `${outcome.role} ${outcome.action} in pane ${outcome.paneId}${suffix}`;
+};
+
+const recoverTaskTool = (dependencies: ForemanDependencies) =>
+  defineTool({
+    name: "recover_task",
+    label: "Recover Task Children",
+    description:
+      "Rebootstrap the Worker (and any Verifier) for one task, or every task on disk when id is omitted. Live children are left alone; a dead child is resumed into its existing pane by pi session id, or its Worker tab is recreated if the pane is gone. Each recovered child receives a re-orientation directive.",
+    promptSnippet: "Rebootstrap dead task children after a restart",
+    parameters: Type.Object({
+      id: Type.Optional(
+        Type.String({
+          description: "Task id to recover; omit to recover every task on disk",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      const ids = params.id ? [params.id] : listTaskIds(dependencies.stateRoot);
+      if (ids.length === 0)
+        return toolResult(
+          params.id
+            ? `No task found with id ${params.id}`
+            : "No tasks found on disk under ~/.foreman/tasks.",
+          undefined,
+          true,
+        );
+
+      const reports: Array<{ id: string; roles: RoleRecoveryOutcome[] }> = [];
+      const errors: string[] = [];
+      for (const id of ids) {
+        const record = readTaskRecord(dependencies.stateRoot, id);
+        if (!record) {
+          errors.push(`${id}: no meta.json`);
+          continue;
+        }
+        const recovered = await recoverTask(dependencies, record);
+        if (recovered.ok) reports.push(recovered.value);
+        else errors.push(`${id}: ${recovered.error.message}`);
+      }
+
+      const lines = reports.map(
+        (report) =>
+          `${report.id}: ${report.roles.map(describeRoleOutcome).join("; ")}`,
+      );
+      const anyFailure =
+        errors.length > 0 ||
+        reports.some((report) =>
+          report.roles.some((role) => role.action === "failed"),
+        );
+      return toolResult(
+        [...lines, ...errors.map((error) => `error ${error}`)].join("\n") ||
+          "Nothing to recover.",
+        { reports, errors },
+        anyFailure || undefined,
+      );
+    },
+  });
+
 const flagTool = (dependencies: ForemanDependencies) =>
   defineTool({
     name: "flag",
@@ -663,6 +931,7 @@ export const createForemanExtension =
     pi.registerTool(messageWorkerTool(dependencies));
     pi.registerTool(startVerifierTool(dependencies));
     pi.registerTool(haltWorkerTool(dependencies));
+    pi.registerTool(recoverTaskTool(dependencies));
     pi.registerTool(flagTool(dependencies));
     registerInbox(pi, process.env.HERDR_PANE_ID);
 
@@ -685,6 +954,15 @@ export const createForemanExtension =
           `Could not rename the Herdr tab to Foreman: ${renamed.message}`,
           "warning",
         );
+
+      if (event.reason === "startup") {
+        const taskCount = listTaskIds(dependencies.stateRoot).length;
+        if (taskCount > 0)
+          ctx.ui.notify(
+            `${taskCount} Task Thread(s) on disk. After a restart, call recover_task to resume dead Workers/Verifiers.`,
+            "info",
+          );
+      }
     });
 
     pi.on("before_agent_start", (event) => ({
@@ -697,6 +975,7 @@ const productionDependencies: ForemanDependencies = {
   stateRoot: join(homedir(), ".foreman"),
   now: Date.now,
   newId: () => Date.now().toString(36),
+  newSessionId: randomUUID,
   extensionPath: productionExtensionPath,
   queueInbox: queueInboxMessage,
 };
