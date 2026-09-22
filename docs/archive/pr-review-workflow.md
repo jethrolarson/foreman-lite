@@ -1,6 +1,6 @@
 # PR review workflow
 
-**Status:** accepted, implemented on `pi-port`  
+**Status:** superseded by [foreman-judgment-redesign](../plans/foreman-judgment-redesign.md) — PR-before-`done` and unconditional Verifier-on-`done` are no longer required; both are now Foreman's contextual choice.
 **Decision date:** 2026-08-09  
 **Revisit when:** agents use distinct GitHub identities, review history moves to another durable system, or merge authority is delegated.
 
