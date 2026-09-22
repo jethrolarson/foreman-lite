@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // and justified-skill tags edit better than escaped string literals. Each
 // extension injects its role as an always-on system prompt via before_agent_start
 // (not as a skill), so the role governs turn 1 without a progressive-disclosure
-// read gate. See docs/handoff.md for the mechanism decision.
+// read gate. See docs/adrs/0001-role-injection-via-before-agent-start.md.
 export function readRole(name: string): string {
   const here = dirname(fileURLToPath(import.meta.url));
   return readFileSync(join(here, "..", "roles", `${name}.md`), "utf8");

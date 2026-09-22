@@ -83,4 +83,4 @@ The test workspaces, task records, inboxes, and disposable repositories were rem
 
 ## Repository safety
 
-The working tree contains human-owned changes to `AGENTS.md`, `CLAUDE.md`, and `docs/vision.md`. Never reset, rewrite, stage indiscriminately, or otherwise overwrite them. Historical incident evidence is in `docs/bugs/`; the policy decision is in `docs/decisions/foreman-owned-policy.md`.
+The working tree contains human-owned changes to `AGENTS.md`, `CLAUDE.md`, and `docs/vision.md`. Never reset, rewrite, stage indiscriminately, or otherwise overwrite them. Historical incident evidence is in `docs/bugs/`; the policy decision is archived at `docs/archive/foreman-owned-policy.md`.

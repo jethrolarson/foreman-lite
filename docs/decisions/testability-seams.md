@@ -16,7 +16,7 @@ Foreman command construction lives in `extensions/foremanMechanics.ts`. It retur
 
 The Herdr hook's event selection and notification construction live in `plugins/task-events/notify-core.mjs`. `notify.mjs` remains the process/environment adapter and the only module that may query Herdr. The pure module never exits a process or starts another role.
 
-Vitest is the default local suite. Extension integration tests use Pi's public `DefaultResourceLoader`, `ExtensionRunner`, and `SessionManager.inMemory()` to exercise tool registration, prompt hooks, lifecycle events, and structured message delivery without a model call. Live Herdr validation remains separate and documented in `docs/handoff.md`; default tests require no Herdr server and make no model calls.
+Vitest is the default local suite. Extension integration tests use Pi's public `DefaultResourceLoader`, `ExtensionRunner`, and `SessionManager.inMemory()` to exercise tool registration, prompt hooks, lifecycle events, and structured message delivery without a model call. Live Herdr validation remains separate and documented in `docs/plans/foreman-judgment-redesign.md`'s evidence record; default tests require no Herdr server and make no model calls.
 
 ## Intentionally unresolved
 
