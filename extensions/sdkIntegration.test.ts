@@ -101,13 +101,10 @@ describe("Pi public SDK extension integration", () => {
     const foreman = (await createRunner(foremanExtension)).runner;
     expect(
       (
-        await foreman.emitBeforeAgentStart(
-          "prompt",
-          undefined,
-          "base",
-          {} as never,
-        )
-      )?.systemPrompt,
+        await foreman.emitBeforeAgentStart("prompt", undefined, {
+          cwd: process.cwd(),
+        })
+      ).systemPromptOptions.forceSystemPrompt,
     ).toContain("Foreman");
 
     process.env.FOREMAN_TASK_ID = "sdk-task";
@@ -116,14 +113,12 @@ describe("Pi public SDK extension integration", () => {
       [verifierExtension, "Verifier"],
     ] as const) {
       const runner = (await createRunner(extension)).runner;
-      const prompt = await runner.emitBeforeAgentStart(
-        "prompt",
-        undefined,
-        "base",
-        {} as never,
-      );
-      expect(prompt?.systemPrompt).toContain("sdk-task");
-      expect(prompt?.systemPrompt).toContain(role);
+      const result = await runner.emitBeforeAgentStart("prompt", undefined, {
+        cwd: process.cwd(),
+      });
+      const prompt = result.systemPromptOptions.forceSystemPrompt;
+      expect(prompt).toContain("sdk-task");
+      expect(prompt).toContain(role);
     }
   });
 
