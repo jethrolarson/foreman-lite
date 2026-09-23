@@ -95,7 +95,7 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
       "Emit a lifecycle signal: `planned` (pause for Foreman input), `done` (the requested result is ready; describe its artifact or outcome in context), or `flag` (blocked, needs input). Every substantive turn must end with one. A branch, commit, or PR is optional and depends on the task.",
     promptSnippet: "Emit a Worker lifecycle signal (planned/done/flag)",
     promptGuidelines: [
-      "For done, keep context to a short summary and where the result lives (path, commit, PR). Put detailed prose, reports, or specs on the result's natural durable surface, not inline in context. Prefer flag-and-be-safe over done-and-wrong.",
+      "For done, keep context to a short summary and where the result lives (path, commit, PR); put detail on the result's natural durable surface instead. REASON: Foreman's working memory is for cross-thread judgment, not implementation detail (roles/foreman.md) — absorbing a full report here defeats that. Prefer flag-and-be-safe over done-and-wrong.",
     ],
     parameters: Type.Union([
       Type.Object({
@@ -109,7 +109,7 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
         action: Type.Literal("done"),
         context: Type.String({
           description:
-            "Short summary of the result, how it was checked, and where it can be found (max 700 characters). Write anything longer — reports, findings, full plans — to a file and reference its path here; the call fails over the limit.",
+            "Short summary of the result, how it was checked, and where it can be found. Kept under 700 characters as a backstop — write longer detail to a file and reference its path here instead.",
           maxLength: 700,
         }),
       }),
