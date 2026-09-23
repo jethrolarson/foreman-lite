@@ -57,4 +57,4 @@ docs/plans/                  active implementation plans
 
 ## Status
 
-The Foreman-judgment redesign is implemented and live-validated across shared non-Git tasks, detached-worktree tasks, arbitrary completion context, Worker/Verifier reuse, halt behavior, deduplicated delivery, and preservation of unsent editor drafts. See `docs/archive/foreman-judgment-redesign.md` for the evidence record.
+The Foreman-judgment redesign (see `docs/adrs/0004-foreman-owns-lifecycle-policy.md`) is implemented and live-validated across shared non-Git tasks, detached-worktree tasks, arbitrary completion context, Worker/Verifier reuse, halt behavior, deduplicated delivery, and preservation of unsent editor drafts.
