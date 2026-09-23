@@ -174,7 +174,7 @@ export default function (pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: "verifier-signal-reminder",
-        content: `You stopped without calling ${SIGNAL_TOOL_NAME}. Every turn must end with approve, deny, or flag — call it now.`,
+        content: `You stopped without calling ${SIGNAL_TOOL_NAME}. Work Foreman started must end with approve, deny, or flag — call it now.`,
         display: true,
       },
       { triggerTurn: true, deliverAs: "followUp" },

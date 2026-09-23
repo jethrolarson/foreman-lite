@@ -92,7 +92,7 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
     name: "worker_signal",
     label: "Worker Signal",
     description:
-      "Emit a lifecycle signal: `planned` (pause for Foreman input), `done` (the requested result is ready; describe its artifact or outcome in context), or `flag` (blocked, needs input). Every substantive turn must end with one. A branch, commit, or PR is optional and depends on the task.",
+      "Emit a lifecycle signal: `planned` (pause for Foreman input), `done` (the requested result is ready; describe its artifact or outcome in context), or `flag` (blocked, needs input). Work Foreman started must end with one; a plain reply to a human typing in the pane needs none. A branch, commit, or PR is optional and depends on the task.",
     promptSnippet: "Emit a Worker lifecycle signal (planned/done/flag)",
     promptGuidelines: [
       "For done, keep context to a short summary and where the result lives (path, commit, PR); put detail on the result's natural durable surface instead. REASON: Foreman's working memory is for cross-thread judgment, not implementation detail (roles/foreman.md) — absorbing a full report here defeats that. Prefer flag-and-be-safe over done-and-wrong.",
@@ -109,7 +109,7 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
         action: Type.Literal("done"),
         context: Type.String({
           description:
-            "Short summary of the result, how it was checked, and where it can be found. Kept under 700 characters as a backstop — write longer detail to a file and reference its path here instead.",
+            "Short summary of the result, how it was checked, and where it can be found. Kept under 700 characters as a backstop — write longer detail to a file and reference its path here instead; calls over the limit are rejected.",
           maxLength: 700,
         }),
       }),
@@ -208,7 +208,7 @@ export default function (pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: "worker-signal-reminder",
-        content: `You stopped without calling ${SIGNAL_TOOL_NAME}. Every turn must end with planned, done, or flag — call it now.`,
+        content: `You stopped without calling ${SIGNAL_TOOL_NAME}. Work Foreman started must end with planned, done, or flag — call it now.`,
         display: true,
       },
       { triggerTurn: true, deliverAs: "followUp" },
