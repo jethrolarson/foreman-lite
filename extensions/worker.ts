@@ -95,7 +95,7 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
       "Emit a lifecycle signal: `planned` (pause for Foreman input), `done` (the requested result is ready; describe its artifact or outcome in context), or `flag` (blocked, needs input). Every substantive turn must end with one. A branch, commit, or PR is optional and depends on the task.",
     promptSnippet: "Emit a Worker lifecycle signal (planned/done/flag)",
     promptGuidelines: [
-      "For done, identify the result in context: it may be prose, a path, report, spec, commit, PR, or another artifact. Prefer flag-and-be-safe over done-and-wrong.",
+      "For done, keep context to a short summary and where the result lives (path, commit, PR). Put detailed prose, reports, or specs on the result's natural durable surface, not inline in context. Prefer flag-and-be-safe over done-and-wrong.",
     ],
     parameters: Type.Union([
       Type.Object({
@@ -108,7 +108,7 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
         action: Type.Literal("done"),
         context: Type.String({
           description:
-            "What result is ready, where it can be found, and how it was checked",
+            "Short summary of the result, how it was checked, and where it can be found — not the report itself",
         }),
       }),
       Type.Object({
