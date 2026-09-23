@@ -102,18 +102,23 @@ export const buildWorkerSignalTool = (pi: ExtensionAPI, taskId: string) => {
         action: Type.Literal("planned"),
         context: Type.String({
           description: "The plan and what input or redirection is needed",
+          maxLength: 700,
         }),
       }),
       Type.Object({
         action: Type.Literal("done"),
         context: Type.String({
           description:
-            "Short summary of the result, how it was checked, and where it can be found — not the report itself",
+            "Short summary of the result, how it was checked, and where it can be found (max 700 characters). Write anything longer — reports, findings, full plans — to a file and reference its path here; the call fails over the limit.",
+          maxLength: 700,
         }),
       }),
       Type.Object({
         action: Type.Literal("flag"),
-        context: Type.String({ description: "What is blocking progress" }),
+        context: Type.String({
+          description: "What is blocking progress",
+          maxLength: 700,
+        }),
       }),
     ]),
 

@@ -91,7 +91,8 @@ export const buildVerifierSignalTool = (pi: ExtensionAPI, taskId: string) => {
       action: StringEnum(["approve", "deny", "flag"] as const),
       context: Type.String({
         description:
-          "What was checked, the verdict, and where any detailed findings live",
+          "What was checked, the verdict, and where any detailed findings live (max 700 characters). Write findings themselves to the artifact's natural surface, not here; the call fails over the limit.",
+        maxLength: 700,
       }),
     }),
 

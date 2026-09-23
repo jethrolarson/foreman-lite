@@ -13,7 +13,15 @@ keep summaries short and put detail on the result's natural surface, but
 opposite — to put prose, reports, or specs directly in `context`.
 `extensions/verifier.ts` already had this right.
 
-Fix: aligned `worker_signal`'s tool description and prompt guidelines with
-`verifier_signal`'s (short summary + pointer, detail on the artifact's own
-surface). No new inbox tool, no truncation, no separate storage — the durable
-side already existed; the tool prompts were lying about it.
+Fix, round 1: aligned `worker_signal`'s tool description and prompt guidelines
+with `verifier_signal`'s (short summary + pointer, detail on the artifact's
+own surface). No new inbox tool, no truncation, no separate storage — the
+durable side already existed; the tool prompts were lying about it.
+
+Round 1 was prompt-only (SHOULD-level) and failed on first live test: a
+recovered Worker session emitted a multi-paragraph report directly in
+`context`, which landed whole in Foreman's turn via `notify-core.mjs`.
+Fix, round 2: added `maxLength: 700` to `context` on `worker_signal` (all
+three actions) and `verifier_signal` — schema validation now hard-rejects an
+oversized call instead of relying on the agent to self-limit, forcing detail
+onto the artifact's own surface with only a pointer in `context`.
