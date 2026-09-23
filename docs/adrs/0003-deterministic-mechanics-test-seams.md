@@ -8,7 +8,7 @@ Transport and orchestration regressions were reaching live Herdr sessions even t
 
 ## Decision
 
-Vitest is the default local suite. Extension integration tests use Pi's public `DefaultResourceLoader`, `ExtensionRunner`, and `SessionManager.inMemory()` to exercise tool registration, prompt hooks, lifecycle events, and structured message delivery without a model call. Live Herdr validation remains separate and documented in `docs/plans/foreman-judgment-redesign.md`'s evidence record; default tests require no Herdr server and make no model calls.
+Vitest is the default local suite. Extension integration tests use Pi's public `DefaultResourceLoader`, `ExtensionRunner`, and `SessionManager.inMemory()` to exercise tool registration, prompt hooks, lifecycle events, and structured message delivery without a model call. Live Herdr validation remains separate and documented in `docs/archive/foreman-judgment-redesign.md`'s evidence record; default tests require no Herdr server and make no model calls.
 
 Seams drawn to make mechanics independently testable:
 

@@ -1,6 +1,6 @@
 # Put lifecycle policy back in Foreman
 
-**Status:** accepted and implemented — see [foreman-judgment-redesign](../plans/foreman-judgment-redesign.md), which carried out this proposal
+**Status:** accepted and implemented — see [foreman-judgment-redesign](foreman-judgment-redesign.md), which carried out this proposal
 **Date:** 2026-08-10
 **Reason:** Noolang PR #184 review thrash showed that unconditional plugin transitions displaced Foreman's contextual judgment.
 
