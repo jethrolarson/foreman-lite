@@ -59,7 +59,7 @@ export const splitVerifierPaneCommand = (
     "split",
     workerPaneId,
     "--direction",
-    "down",
+    "right",
     "--cwd",
     cwd,
     "--no-focus",
