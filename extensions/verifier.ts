@@ -2,9 +2,7 @@
  * Verifier extension: the lifecycle-signal tool for a Task Thread's Verifier.
  *
  * Loaded only for Verifier panes. Foreman starts one in the Task Thread's
- * directory and identifies the artifact or claim to verify. Like worker.ts,
- * a Foreman-started run that ends without a verdict is reported to Foreman
- * as a `stopped` event, so a Verifier cannot go silently idle.
+ * directory and identifies the artifact or claim to verify.
  *
  * Shares `~/.foreman/tasks/<id>/events.jsonl` with the Worker; events are
  * stamped `role: "verifier"` so the task-events plugin can route them back

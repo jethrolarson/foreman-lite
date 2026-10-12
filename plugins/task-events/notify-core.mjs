@@ -16,8 +16,7 @@ export const notificationId = (task, taskEvent) => {
   return createHash("sha256").update(key).digest("hex").slice(0, 32);
 };
 
-// A `stopped` event's context is the role's final reply, not a signal, so
-// say so: Foreman interprets it rather than routing it as a verdict.
+// `stopped` context is a final reply, not a verdict.
 const headline = (source, taskId, action) => {
   const role = source === "verifier" ? "Verifier" : "Worker";
   if (action === "stopped")

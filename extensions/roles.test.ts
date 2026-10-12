@@ -65,7 +65,7 @@ afterEach(() => {
   homes.splice(0).forEach((home) => rmSync(home, { recursive: true }));
 });
 
-// Role extensions append to ~/.foreman; keep that under a throwaway HOME.
+// Role extensions write under ~/.foreman.
 const isolatedHome = () => {
   const home = mkdtempSync(join(tmpdir(), "foreman-roles-"));
   homes.push(home);
