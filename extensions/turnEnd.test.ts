@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
-import { runOrigin } from "./signalReminder.js";
+import { excerpt, runOrigin, unsignaledStopContext } from "./turnEnd.js";
 
 const user = (text: string) =>
   ({
@@ -41,14 +41,36 @@ describe("runOrigin", () => {
     ).toBe("task");
   });
 
-  it("keeps forcing when a prior reminder re-ran the agent", () => {
-    expect(
-      runOrigin([custom("worker-signal-reminder"), assistant()], false),
-    ).toBe("task");
-  });
-
   it("fails safe to task when the run has no initiating message", () => {
     expect(runOrigin([], false)).toBe("task");
     expect(runOrigin([assistant()], false)).toBe("task");
+  });
+});
+
+describe("excerpt", () => {
+  it("keeps short replies whole and both ends of long ones", () => {
+    expect(excerpt("short", 20)).toBe("short");
+    const long = `${"a".repeat(50)}${"b".repeat(50)}`;
+    const cut = excerpt(long, 23);
+    expect(cut.length).toBeLessThanOrEqual(23);
+    expect(cut.startsWith("aaaa")).toBe(true);
+    expect(cut.endsWith("bbbb")).toBe(true);
+  });
+});
+
+describe("unsignaledStopContext", () => {
+  it("reports when the final reply holds only thinking or tool calls", () => {
+    const silent = {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "toolCall", name: "bash" }],
+    } as unknown as AgentMessage;
+    expect(
+      unsignaledStopContext(
+        [custom("directive"), silent],
+        "worker_signal",
+        false,
+      ),
+    ).toBe("(no text reply)");
   });
 });

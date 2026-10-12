@@ -16,6 +16,16 @@ export const notificationId = (task, taskEvent) => {
   return createHash("sha256").update(key).digest("hex").slice(0, 32);
 };
 
+// A `stopped` event's context is the role's final reply, not a signal, so
+// say so: Foreman interprets it rather than routing it as a verdict.
+const headline = (source, taskId, action) => {
+  const role = source === "verifier" ? "Verifier" : "Worker";
+  if (action === "stopped")
+    return `${role} for task ${taskId} stopped without a signal. Final reply:`;
+  const label = source === "verifier" ? "Verifier verdict" : "Worker signal";
+  return `${label} for task ${taskId}: ${action}`;
+};
+
 export const buildNotification = ({
   task,
   paneId,
@@ -28,13 +38,12 @@ export const buildNotification = ({
   const action = taskEvent?.action ?? "none";
   const context =
     taskEvent?.context ?? `Agent became ${paneStatus} without a signal.`;
-  const label = source === "verifier" ? "Verifier verdict" : "Worker signal";
   return {
     paneId: task.foremanPaneId,
     message: {
       id: notificationId(task, taskEvent),
       customType: "foreman-task-signal",
-      content: `${label} for task ${task.id}: ${action}\n${context}`,
+      content: `${headline(source, task.id, action)}\n${context}`,
       details: {
         source,
         taskId: task.id,
