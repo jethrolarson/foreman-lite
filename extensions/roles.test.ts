@@ -1,15 +1,17 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Value } from "typebox/value";
 import foremanExtension from "./foreman.js";
-import workerExtension, {
-  buildWorkerSignalTool,
-  workerEndedWithModelFailure,
-} from "./worker.js";
-import verifierExtension, {
-  verifierEndedWithModelFailure,
-} from "./verifier.js";
-import { taskIdFromEnvironment, taskStateDir } from "./taskState.js";
+import workerExtension, { buildWorkerSignalTool } from "./worker.js";
+import verifierExtension from "./verifier.js";
+import {
+  taskEventsPath,
+  taskIdFromEnvironment,
+  taskStateDir,
+} from "./taskState.js";
 
 const fakePi = () => {
   const tools: Array<{ name: string }> = [];
@@ -37,14 +39,49 @@ const assistant = (
 ) => ({
   role: "assistant",
   stopReason,
+  errorMessage: stopReason === "error" ? "429 insufficient balance" : undefined,
   content: toolName
     ? [{ type: "toolCall", name: toolName }]
     : [{ type: "text", text: "result" }],
 });
 
+const user = (text: string) => ({
+  role: "user",
+  content: [{ type: "text", text }],
+});
+
+const custom = (customType: string) => ({
+  role: "custom",
+  customType,
+  content: "",
+  display: true,
+});
+
+const homes: string[] = [];
+
 afterEach(() => {
   delete process.env.FOREMAN_TASK_ID;
+  vi.unstubAllEnvs();
+  homes.splice(0).forEach((home) => rmSync(home, { recursive: true }));
 });
+
+// Role extensions write under ~/.foreman.
+const isolatedHome = () => {
+  const home = mkdtempSync(join(tmpdir(), "foreman-roles-"));
+  homes.push(home);
+  vi.stubEnv("HOME", home);
+};
+
+const recordedEvents = (taskId: string) => {
+  try {
+    return readFileSync(taskEventsPath(taskId), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+};
 
 describe("task identity", () => {
   it("rejects missing and blank ids and keeps shared-directory ids distinct", () => {
@@ -72,111 +109,104 @@ describe("task identity", () => {
 });
 
 describe.each([
-  ["Worker", workerExtension, "worker_signal", workerEndedWithModelFailure],
-  [
-    "Verifier",
-    verifierExtension,
-    "verifier_signal",
-    verifierEndedWithModelFailure,
-  ],
-] as const)(
-  "%s extension",
-  (_label, extension, signalName, endedWithFailure) => {
-    it("registers only its signal and appends role plus task id to the prompt", () => {
-      process.env.FOREMAN_TASK_ID = "task-7";
-      const state = fakePi();
-      extension(state.pi);
-      expect(state.tools.map(({ name }) => name)).toEqual([signalName]);
-      const result = state.handlers.get("before_agent_start")?.({
-        systemPrompt: "base",
-      } as never);
-      expect(result).toMatchObject({
-        systemPrompt: expect.stringContaining("task-7"),
-      });
+  ["worker", workerExtension, "worker_signal"],
+  ["verifier", verifierExtension, "verifier_signal"],
+] as const)("%s extension", (role, extension, signalName) => {
+  it("registers only its signal and appends role plus task id to the prompt", () => {
+    process.env.FOREMAN_TASK_ID = "task-7";
+    const state = fakePi();
+    extension(state.pi);
+    expect(state.tools.map(({ name }) => name)).toEqual([signalName]);
+    const result = state.handlers.get("before_agent_start")?.({
+      systemPrompt: "base",
+    } as never);
+    expect(result).toMatchObject({
+      systemPrompt: expect.stringContaining("task-7"),
     });
+  });
 
-    it("does not remind after provider errors or explicit aborts", () => {
-      expect(endedWithFailure([assistant("error") as never])).toBe(true);
-      expect(endedWithFailure([assistant("aborted") as never])).toBe(true);
-      process.env.FOREMAN_TASK_ID = "task";
-      const state = fakePi();
-      extension(state.pi);
-      state.handlers.get("agent_end")?.({
-        messages: [assistant("error")],
-      } as never);
-      state.handlers.get("agent_end")?.({
-        messages: [assistant("aborted")],
-      } as never);
-      expect(state.sent).toEqual([]);
+  const started = () => {
+    isolatedHome();
+    process.env.FOREMAN_TASK_ID = "task";
+    const state = fakePi();
+    extension(state.pi);
+    const handler = (name: string) => (event: unknown) =>
+      state.handlers.get(name)?.(event as never);
+    const run = (messages: unknown[]) => {
+      handler("agent_end")({ messages });
+      handler("agent_settled")({});
+    };
+    handler("session_start")({ reason: "startup" });
+    return { state, run, handler };
+  };
+
+  it("reports an unsignaled task stop with the final reply, never nagging", () => {
+    const { state, run } = started();
+    run([user("do the task"), assistant("stop")]);
+    expect(recordedEvents("task")).toMatchObject([
+      {
+        role,
+        action: "stopped",
+        origin: "task",
+        stopReason: "stop",
+        context: "result",
+      },
+    ]);
+    expect(state.sent).toEqual([]);
+  });
+
+  it("reports provider errors and aborts, skipping signaled runs", () => {
+    const { run } = started();
+    run([user("do the task"), assistant("stop", signalName)]);
+    run([custom("directive"), assistant("aborted")]);
+    run([custom("directive"), assistant("error")]);
+    expect(
+      recordedEvents("task").map(({ stopReason, context }) => [
+        stopReason,
+        context,
+      ]),
+    ).toEqual([
+      ["aborted", "result"],
+      ["error", "Provider error: 429 insufficient balance"],
+    ]);
+  });
+
+  it("reports once at settlement, after pi's retries", () => {
+    const { handler } = started();
+    handler("agent_end")({
+      messages: [user("do the task"), assistant("error")],
     });
+    handler("agent_end")({ messages: [assistant("stop", signalName)] });
+    handler("agent_settled")({});
+    expect(recordedEvents("task")).toEqual([]);
+  });
 
-    it("bounds ordinary reminders and a signal resets the cycle", () => {
-      process.env.FOREMAN_TASK_ID = "task";
-      const state = fakePi();
-      extension(state.pi);
-      const end = state.handlers.get("agent_end");
-      end?.({ messages: [assistant("stop")] } as never);
-      end?.({ messages: [assistant("stop", signalName)] } as never);
-      end?.({ messages: [assistant("stop")] } as never);
-      end?.({ messages: [assistant("stop")] } as never);
-      end?.({ messages: [assistant("stop")] } as never);
-      end?.({ messages: [assistant("stop")] } as never);
-      expect(
-        state.sent.filter(({ options }) => options?.triggerTurn),
-      ).toHaveLength(4);
-      expect(state.sent.at(-1)?.options?.triggerTurn).toBe(false);
+  it("labels a human-started run human, including through a retry", () => {
+    const { run, handler } = started();
+    run([user("do the task"), assistant("stop", signalName)]);
+    handler("agent_end")({
+      messages: [user("why this approach?"), assistant("error")],
     });
+    // pi's retry continues without a new initiating message.
+    handler("agent_end")({ messages: [assistant("stop")] });
+    handler("agent_settled")({});
+    expect(recordedEvents("task")).toMatchObject([
+      {
+        origin: "human",
+        stopReason: "stop",
+        context: "Human: why this approach?\nReply: result",
+      },
+    ]);
+  });
 
-    it("stays silent when an attached human, not the task, started the run", () => {
-      process.env.FOREMAN_TASK_ID = "task";
-      const state = fakePi();
-      extension(state.pi);
-      const start = state.handlers.get("session_start");
-      const end = state.handlers.get("agent_end");
-      const user = (text: string) => ({
-        role: "user",
-        content: [{ type: "text", text }],
-      });
-
-      start?.({ reason: "startup" } as never);
-      // The launch-prompt run: an omitted signal is still forced.
-      end?.({ messages: [user("do the task"), assistant("stop")] } as never);
-      // Later run started by a human typing into the attached pane.
-      end?.({
-        messages: [user("why this approach?"), assistant("stop")],
-      } as never);
-
-      expect(
-        state.sent.filter(({ options }) => options?.triggerTurn),
-      ).toHaveLength(1);
-      expect(state.sent).toHaveLength(1);
-    });
-
-    it("does not re-arm launch-prompt enforcement after a /reload", () => {
-      process.env.FOREMAN_TASK_ID = "task";
-      const state = fakePi();
-      extension(state.pi);
-      const start = state.handlers.get("session_start");
-      const end = state.handlers.get("agent_end");
-      const user = (text: string) => ({
-        role: "user",
-        content: [{ type: "text", text }],
-      });
-
-      start?.({ reason: "startup" } as never);
-      end?.({
-        messages: [user("do the task"), assistant("stop", signalName)],
-      } as never);
-      // /reload re-runs the extension mid-session; the prompt run is behind us.
-      start?.({ reason: "reload" } as never);
-      end?.({
-        messages: [user("quick question?"), assistant("stop")],
-      } as never);
-
-      expect(state.sent).toHaveLength(0);
-    });
-  },
-);
+  it("does not treat a run after /reload as the launch prompt", () => {
+    const { run, handler } = started();
+    run([user("do the task"), assistant("stop", signalName)]);
+    handler("session_start")({ reason: "reload" });
+    run([user("quick question?"), assistant("stop")]);
+    expect(recordedEvents("task")).toMatchObject([{ origin: "human" }]);
+  });
+});
 
 describe("Foreman extension authority", () => {
   it("registers exactly the intended tools and appends its role prompt", () => {

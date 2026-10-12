@@ -131,6 +131,26 @@ describe("task event notification logic", () => {
     ).toBeUndefined();
   });
 
+  it("presents a stopped event as a final reply, not a signal", () => {
+    const result = buildNotification({
+      task: { id: "task", role: "worker", foremanPaneId: "foreman" },
+      paneId: "worker",
+      paneStatus: "idle",
+      taskEvent: {
+        role: "worker",
+        action: "stopped",
+        origin: "human",
+        stopReason: "stop",
+        context: "Should I also update the docs?",
+        timestamp: 7,
+      },
+      now: () => 99,
+    });
+    expect(result.message.content).toBe(
+      "Worker for task task stopped without a signal (started by a human in the pane, stop reason: stop). Final reply:\nShould I also update the docs?",
+    );
+  });
+
   it("ignores untracked panes and non-reactable statuses", async () => {
     const { home, root } = fixture();
     await run(home, { data: { pane_id: "unknown", agent_status: "done" } });

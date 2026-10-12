@@ -29,6 +29,8 @@ MUST: choose placement from the task's actual isolation needs. REASON: coupling 
 - Worker `flag(context)`: reports a blocker or uncertainty.
 - Verifier `approve|deny|flag(context)`: reports independent evidence about the artifact Foreman named.
 
+When a run ends without a signal, the role extension records `stopped` with `origin` (`task` for Foreman-started, `human` for typed in the pane), `stopReason` (`stop`, `error`, `aborted`, …), and context: an excerpt of the final reply or provider error. Human-started context is smaller and includes a trimmed copy of the human's message.
+
 Signals do not authorize a next transition. Foreman chooses whether to use `message_worker`, `start_verifier`, `flag`, or no tool.
 
 Automated messages use per-pane structured inboxes under `~/.foreman/inboxes/`. The role extensions deliver them with Pi's `sendMessage()` API, so they do not type into the human's editor. Immutable files in `messages/` provide durable dedupe; `delivered/` receipts are written only after acceptance.
@@ -39,7 +41,7 @@ HAZARD: do not use `herdr agent prompt` for automated routing. REASON: it types 
 
 - `~/.foreman/registry.json`: pane-id map used by the Herdr plugin. Entries identify task, role, workspace, tab, Worker/Verifier panes, placement, and Foreman pane.
 - `~/.foreman/tasks/<id>/meta.json`: canonical Task Thread record, including `workerSessionId` and `verifierSessionId` — the pi project session ids used to resume a child with its full transcript.
-- `~/.foreman/tasks/<id>/events.jsonl`: append-only Worker and Verifier signals `{role, action, context, timestamp}`.
+- `~/.foreman/tasks/<id>/events.jsonl`: append-only Worker and Verifier signals and `stopped` reports `{role, action, context, timestamp}`.
 - `~/.foreman/inboxes/<encoded-pane-id>/`: immutable messages, delivered/failed receipts, and current session-owner state.
 
 HAZARD: compaction can remove conversational task detail while disk state remains authoritative. REASON: guessing after compaction can route an old signal as current. Recover by reading `registry.json`, each task's `meta.json`, and the last relevant lines of `events.jsonl`.
