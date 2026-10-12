@@ -22,6 +22,7 @@ import {
   createTaskTabCommand,
   describeTabFailure,
   haltPaneCommand,
+  labelPaneCommand,
   paneGetCommand,
   parseLiveAgentPanes,
   removeWorktreeCommand,
@@ -312,11 +313,22 @@ const createTaskTab = (
   const pane = value.root_pane ?? value.pane;
   const paneId = pane?.pane_id;
   const tabId = value.tab?.tab_id ?? pane?.tab_id;
-  return paneId && tabId
-    ? ok({ paneId, tabId })
-    : fail(
-        `herdr tab create returned no tab/pane id: ${JSON.stringify(value)}`,
-      );
+  if (!paneId || !tabId)
+    return fail(
+      `herdr tab create returned no tab/pane id: ${JSON.stringify(value)}`,
+    );
+  labelPane(commands, paneId, "Worker");
+  return ok({ paneId, tabId });
+};
+
+// Labels are display-only; a failed rename must not fail task creation.
+const labelPane = (
+  commands: ForemanCommandRunner,
+  paneId: string,
+  label: string,
+): void => {
+  const command = labelPaneCommand(paneId, label);
+  commands.run(command.executable, command.args);
 };
 
 const startWorker = async (
@@ -380,6 +392,7 @@ const startVerifier = async (
     return fail(
       `herdr pane split returned no pane id: ${JSON.stringify(split.value)}`,
     );
+  labelPane(dependencies.commands, paneId, "Verifier");
 
   const promptFile = writePromptFile(
     dependencies.stateRoot,

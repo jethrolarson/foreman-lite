@@ -74,6 +74,14 @@ export const runPaneCommand = (
   args: ["pane", "run", paneId, command],
 });
 
+export const labelPaneCommand = (
+  paneId: string,
+  label: string,
+): CommandPlan => ({
+  executable: "herdr",
+  args: ["pane", "rename", paneId, label],
+});
+
 export const haltPaneCommand = (paneId: string): CommandPlan => ({
   executable: "herdr",
   args: ["agent", "send-keys", paneId, "esc"],
