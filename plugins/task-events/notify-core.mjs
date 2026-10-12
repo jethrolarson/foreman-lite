@@ -23,7 +23,7 @@ const headline = (source, taskId, taskEvent) => {
   const role = source === "verifier" ? "Verifier" : "Worker";
   const action = taskEvent?.action ?? "none";
   if (action === "stopped")
-    return `${role} for task ${taskId} stopped without a signal (started by ${STARTED_BY[taskEvent.origin] ?? "unknown"}, stop reason: ${taskEvent.stopReason}). Final reply:`;
+    return `${role} for task ${taskId} ended its turn without a signal (started by ${STARTED_BY[taskEvent.origin] ?? "unknown"}, stop reason: ${taskEvent.stopReason}). Final reply:`;
   const label = source === "verifier" ? "Verifier verdict" : "Worker signal";
   return `${label} for task ${taskId}: ${action}`;
 };
