@@ -10,16 +10,11 @@ Why a run ends without a signal varies: finished but forgot, asked a question in
 
 ## Decision
 
-- Remove the nag loop.
-- When a Foreman-started run settles without a signal, the role extension appends `{action: "stopped", context}` to `events.jsonl`. Context is an excerpt of the final reply (700 chars, head and tail) or the provider error.
-- Not reported: runs a human started in the pane, aborted runs (`halt_worker`, Esc), and runs that signaled.
-- The plugin delivers it like a signal, labeled as a final reply. Foreman decides what it means.
-- Signals stay the preferred path: explicit intent, bounded context.
+Infrastructure reports unsignaled stops instead of enforcing signals. When work Foreman started ends without a signal, Foreman receives the child's final reply and decides what it means. Signals remain the preferred path.
 
 ## Consequences
 
 - Every stop that matters reaches Foreman, at the cost of one Foreman turn per unsignaled stop.
 - Nothing enforces signaling. A child that habitually skips signals costs Foreman inference instead of costing local corrective turns.
-- Reporting waits for pi's `agent_settled`, so auto-retries and queued follow-ups report once, at idle.
 - Known gap: a signal followed by an unsignaled queued run before idle reaches Foreman as `stopped` only; the earlier signal stays in `events.jsonl`. The plugin delivers only the latest event.
 - A harness adapter only needs to append one event at idle, not veto turn end. Origin detection (human or Foreman) is still per harness.
