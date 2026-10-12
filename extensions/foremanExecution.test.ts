@@ -149,6 +149,31 @@ describe("Foreman execution through an injected command runner", () => {
     );
   });
 
+  it("labels Worker and Verifier panes by role", async () => {
+    const state = setup(successfulCommands);
+    const id = await createSharedTask(state);
+    await state.execute("start_verifier", { id, context: "Check it." });
+    expect(state.calls).toContainEqual(
+      expect.objectContaining({
+        args: ["pane", "rename", "worker-pane", "Worker"],
+      }),
+    );
+    expect(state.calls).toContainEqual(
+      expect.objectContaining({
+        args: ["pane", "rename", "verifier-pane", "Verifier"],
+      }),
+    );
+  });
+
+  it("creates the task even when the pane label fails", async () => {
+    const state = setup((kind, executable, args) =>
+      args[0] === "pane" && args[1] === "rename"
+        ? fail("rename failed")
+        : successfulCommands(kind, executable, args),
+    );
+    await createSharedTask(state);
+  });
+
   it("rolls a worktree back after tab failure and exposes rollback failure", async () => {
     const state = setup((kind, executable, args) => {
       if (kind === "run" && executable === "git" && args.includes("rev-parse"))
