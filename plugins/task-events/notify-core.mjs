@@ -16,11 +16,14 @@ export const notificationId = (task, taskEvent) => {
   return createHash("sha256").update(key).digest("hex").slice(0, 32);
 };
 
+const STARTED_BY = { task: "Foreman", human: "a human in the pane" };
+
 // `stopped` context is a final reply, not a verdict.
-const headline = (source, taskId, action) => {
+const headline = (source, taskId, taskEvent) => {
   const role = source === "verifier" ? "Verifier" : "Worker";
+  const action = taskEvent?.action ?? "none";
   if (action === "stopped")
-    return `${role} for task ${taskId} stopped without a signal. Final reply:`;
+    return `${role} for task ${taskId} stopped without a signal (started by ${STARTED_BY[taskEvent.origin] ?? "unknown"}, stop reason: ${taskEvent.stopReason}). Final reply:`;
   const label = source === "verifier" ? "Verifier verdict" : "Worker signal";
   return `${label} for task ${taskId}: ${action}`;
 };
@@ -42,7 +45,7 @@ export const buildNotification = ({
     message: {
       id: notificationId(task, taskEvent),
       customType: "foreman-task-signal",
-      content: `${headline(source, task.id, action)}\n${context}`,
+      content: `${headline(source, task.id, taskEvent)}\n${context}`,
       details: {
         source,
         taskId: task.id,
@@ -50,6 +53,8 @@ export const buildNotification = ({
         paneStatus,
         action,
         context,
+        origin: taskEvent?.origin,
+        stopReason: taskEvent?.stopReason,
         eventTimestamp: taskEvent?.timestamp,
       },
       createdAt: taskEvent?.timestamp ?? now(),

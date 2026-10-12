@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
-import { excerpt, runOrigin, unsignaledStopContext } from "./turnEnd.js";
+import { excerpt, initiatorOrigin, unsignaledStop } from "./turnEnd.js";
 
 const user = (text: string) =>
   ({
@@ -21,29 +21,34 @@ const custom = (customType: string) =>
     display: true,
   }) as unknown as AgentMessage;
 
-describe("runOrigin", () => {
+describe("initiatorOrigin", () => {
   it("treats the session's first run as task work", () => {
-    expect(runOrigin([user("do the task"), assistant()], true)).toBe("task");
+    expect(initiatorOrigin([user("do the task"), assistant()], true)).toBe(
+      "task",
+    );
   });
 
   it("treats a later bare user run as a human aside", () => {
-    expect(runOrigin([user("quick question?"), assistant()], false)).toBe(
+    expect(initiatorOrigin([user("quick question?"), assistant()], false)).toBe(
       "human",
     );
   });
 
   it("treats any Foreman directive run as task work, first or not", () => {
     expect(
-      runOrigin([custom("foreman-worker-directive"), assistant()], false),
+      initiatorOrigin([custom("foreman-worker-directive"), assistant()], false),
     ).toBe("task");
     expect(
-      runOrigin([custom("foreman-verifier-directive"), assistant()], false),
+      initiatorOrigin(
+        [custom("foreman-verifier-directive"), assistant()],
+        false,
+      ),
     ).toBe("task");
   });
 
-  it("fails safe to task when the run has no initiating message", () => {
-    expect(runOrigin([], false)).toBe("task");
-    expect(runOrigin([assistant()], false)).toBe("task");
+  it("leaves continuation runs (retries, compaction) to the caller", () => {
+    expect(initiatorOrigin([], false)).toBeUndefined();
+    expect(initiatorOrigin([assistant()], true)).toBeUndefined();
   });
 });
 
@@ -58,7 +63,7 @@ describe("excerpt", () => {
   });
 });
 
-describe("unsignaledStopContext", () => {
+describe("unsignaledStop", () => {
   it("reports when the final reply holds only thinking or tool calls", () => {
     const silent = {
       role: "assistant",
@@ -66,11 +71,27 @@ describe("unsignaledStopContext", () => {
       content: [{ type: "toolCall", name: "bash" }],
     } as unknown as AgentMessage;
     expect(
-      unsignaledStopContext(
-        [custom("directive"), silent],
-        "worker_signal",
-        false,
-      ),
-    ).toBe("(no text reply)");
+      unsignaledStop([custom("directive"), silent], "worker_signal", {
+        origin: "task",
+      }),
+    ).toEqual({
+      origin: "task",
+      stopReason: "stop",
+      context: "(no text reply)",
+    });
+  });
+
+  it("pairs a trimmed human message with a small reply excerpt", () => {
+    const stop = unsignaledStop(
+      [assistant("y".repeat(1000))],
+      "worker_signal",
+      {
+        origin: "human",
+        asked: "x".repeat(1000),
+      },
+    );
+    const [asked = "", reply = ""] = stop?.context.split("\nReply: ") ?? [];
+    expect(asked.length).toBeLessThanOrEqual("Human: ".length + 120);
+    expect(reply.length).toBeLessThanOrEqual(200);
   });
 });

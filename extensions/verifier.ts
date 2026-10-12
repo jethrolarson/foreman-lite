@@ -17,7 +17,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { registerInbox } from "./inbox.js";
 import { readRole } from "./roles.js";
-import { registerStopReporting } from "./turnEnd.js";
+import { registerStopReporting, type UnsignaledStop } from "./turnEnd.js";
 import { taskEventsPath, taskIdFromEnvironment } from "./taskState.js";
 
 type VerifierAction = "approve" | "deny" | "flag";
@@ -28,16 +28,16 @@ const SIGNAL_TOOL_NAME = "verifier_signal";
 // turn 1 — not a skill, to avoid the progressive-disclosure read gate.
 const VERIFIER_ROLE_PROMPT = readRole("verifier");
 
-function appendTaskEvent(
-  taskId: string,
-  action: VerifierAction | "stopped",
-  context: string,
-): void {
+type TaskEvent =
+  | { action: VerifierAction; context: string }
+  | ({ action: "stopped" } & UnsignaledStop);
+
+function appendTaskEvent(taskId: string, event: TaskEvent): void {
   const path = taskEventsPath(taskId);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(
     path,
-    `${JSON.stringify({ role: "verifier", action, context, timestamp: Date.now() })}\n`,
+    `${JSON.stringify({ role: "verifier", ...event, timestamp: Date.now() })}\n`,
   );
 }
 
@@ -72,7 +72,10 @@ export const buildVerifierSignalTool = (pi: ExtensionAPI, taskId: string) => {
     }),
 
     async execute(_toolCallId, params) {
-      appendTaskEvent(taskId, params.action, params.context);
+      appendTaskEvent(taskId, {
+        action: params.action,
+        context: params.context,
+      });
 
       pi.events.emit("herdr:blocked", {
         active: params.action === "flag",
@@ -99,7 +102,7 @@ export default function (pi: ExtensionAPI) {
     systemPrompt: `${event.systemPrompt}\n\nYour foreman-lite task id is \`${taskId}\`.\n\n${VERIFIER_ROLE_PROMPT}`,
   }));
 
-  registerStopReporting(pi, SIGNAL_TOOL_NAME, (context) =>
-    appendTaskEvent(taskId, "stopped", context),
+  registerStopReporting(pi, SIGNAL_TOOL_NAME, (stop) =>
+    appendTaskEvent(taskId, { action: "stopped", ...stop }),
   );
 }

@@ -18,7 +18,7 @@ Each role reports facts through signals:
 - Worker: `planned(context)` · `done(context)` · `flag(context)`
 - Verifier: `approve(context)` · `deny(context)` · `flag(context)`
 
-A Foreman-started run that ends without a signal reaches Foreman as `stopped`, with an excerpt of the role's final reply; Foreman decides what it means.
+A run that ends without a signal reaches Foreman as `stopped`, labeled with who started it and why it stopped, plus an excerpt of the role's final reply; Foreman decides what it means.
 
 `done(context)` may identify prose, a report, spec, path, commit, PR, or another artifact. Signals do not automatically spawn review or remediation. Foreman may message the existing Worker, start or reuse a Verifier with a contextual review request, alert the human, or take no action.
 

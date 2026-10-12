@@ -10,11 +10,11 @@ Why a run ends without a signal varies: finished but forgot, asked a question in
 
 ## Decision
 
-Infrastructure reports unsignaled stops instead of enforcing signals. When work Foreman started ends without a signal, Foreman receives the child's final reply and decides what it means. Signals remain the preferred path.
+Infrastructure reports unsignaled stops instead of enforcing signals, and does not filter them. Every stop without a signal reaches Foreman with the child's final reply, labeled with who started the run and why it stopped; Foreman decides what it means. Human-started stops carry smaller context. Signals remain the preferred path.
 
 ## Consequences
 
-- Every stop that matters reaches Foreman, at the cost of one Foreman turn per unsignaled stop.
+- Every stop reaches Foreman, at the cost of one Foreman turn per unsignaled stop, including human chats in a child pane. Origin misdetection becomes a mislabel rather than a dropped or misrouted message.
 - Nothing enforces signaling. A child that habitually skips signals costs Foreman inference instead of costing local corrective turns.
 - Known gap: a signal followed by an unsignaled queued run before idle reaches Foreman as `stopped` only; the earlier signal stays in `events.jsonl`. The plugin delivers only the latest event.
 - A harness adapter only needs to append one event at idle, not veto turn end. Origin detection (human or Foreman) is still per harness.

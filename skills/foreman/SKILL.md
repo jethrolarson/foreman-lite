@@ -29,7 +29,7 @@ MUST: choose placement from the task's actual isolation needs. REASON: coupling 
 - Worker `flag(context)`: reports a blocker or uncertainty.
 - Verifier `approve|deny|flag(context)`: reports independent evidence about the artifact Foreman named.
 
-When a run Foreman started ends without a signal, the role extension records `stopped(context)`, where context is an excerpt of the child's final reply or its provider error. Runs a human started in the pane, and aborted runs (`halt_worker`, Esc), are not reported.
+When a run ends without a signal, the role extension records `stopped` with `origin` (`task` for Foreman-started, `human` for typed in the pane), `stopReason` (`stop`, `error`, `aborted`, …), and context: an excerpt of the final reply or provider error. Human-started context is smaller and includes a trimmed copy of the human's message.
 
 Signals do not authorize a next transition. Foreman chooses whether to use `message_worker`, `start_verifier`, `flag`, or no tool.
 

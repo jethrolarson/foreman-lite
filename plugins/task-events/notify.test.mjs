@@ -139,13 +139,15 @@ describe("task event notification logic", () => {
       taskEvent: {
         role: "worker",
         action: "stopped",
+        origin: "human",
+        stopReason: "stop",
         context: "Should I also update the docs?",
         timestamp: 7,
       },
       now: () => 99,
     });
     expect(result.message.content).toBe(
-      "Worker for task task stopped without a signal. Final reply:\nShould I also update the docs?",
+      "Worker for task task stopped without a signal (started by a human in the pane, stop reason: stop). Final reply:\nShould I also update the docs?",
     );
   });
 

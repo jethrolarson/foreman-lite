@@ -144,37 +144,59 @@ describe.each([
     const { state, run } = started();
     run([user("do the task"), assistant("stop")]);
     expect(recordedEvents("task")).toMatchObject([
-      { role, action: "stopped", context: "result" },
+      {
+        role,
+        action: "stopped",
+        origin: "task",
+        stopReason: "stop",
+        context: "result",
+      },
     ]);
     expect(state.sent).toEqual([]);
   });
 
-  it("reports provider errors and skips signaled or aborted runs", () => {
+  it("reports provider errors and aborts, skipping signaled runs", () => {
     const { run } = started();
     run([user("do the task"), assistant("stop", signalName)]);
     run([custom("directive"), assistant("aborted")]);
     run([custom("directive"), assistant("error")]);
-    expect(recordedEvents("task").map(({ context }) => context)).toEqual([
-      "Provider error: 429 insufficient balance",
+    expect(
+      recordedEvents("task").map(({ stopReason, context }) => [
+        stopReason,
+        context,
+      ]),
+    ).toEqual([
+      ["aborted", "result"],
+      ["error", "Provider error: 429 insufficient balance"],
     ]);
   });
 
-  it("waits for settlement, reporting only the last run before idle", () => {
+  it("reports once at settlement, after pi's retries", () => {
     const { handler } = started();
     handler("agent_end")({
       messages: [user("do the task"), assistant("error")],
     });
-    // pi auto-retries; the retry run ends before the session settles.
     handler("agent_end")({ messages: [assistant("stop", signalName)] });
     handler("agent_settled")({});
     expect(recordedEvents("task")).toEqual([]);
   });
 
-  it("stays silent when an attached human, not the task, started the run", () => {
-    const { run } = started();
+  it("labels a human-started run human, including through a retry", () => {
+    const { run, handler } = started();
     run([user("do the task"), assistant("stop", signalName)]);
-    run([user("why this approach?"), assistant("stop")]);
-    expect(recordedEvents("task")).toEqual([]);
+    handler("agent_end")({
+      messages: [user("why this approach?"), assistant("error")],
+    });
+    // pi's retry continues without a new initiating message.
+    handler("agent_end")({ messages: [assistant("stop")] });
+    handler("agent_settled")({});
+    expect(recordedEvents("task")).toMatchObject([
+      {
+        origin: "human",
+        stopReason: "stop",
+        context: "Human: why this approach?\nReply: result",
+      },
+    ]);
   });
 
   it("does not treat a run after /reload as the launch prompt", () => {
@@ -182,7 +204,7 @@ describe.each([
     run([user("do the task"), assistant("stop", signalName)]);
     handler("session_start")({ reason: "reload" });
     run([user("quick question?"), assistant("stop")]);
-    expect(recordedEvents("task")).toEqual([]);
+    expect(recordedEvents("task")).toMatchObject([{ origin: "human" }]);
   });
 });
 
