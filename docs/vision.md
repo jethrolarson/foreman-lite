@@ -29,7 +29,7 @@ I see 3 agent roles to start
 
 ### Foreman
 
-MUST not complete tasks itself. It stays high-level orchestrator to keep tasks going so it's working memory doesn't get bloated. Compaction must not lose tract of task threads. Foremand doesn't review the work, just ensures that review happens.
+MUST not complete tasks itself. It stays high-level orchestrator to keep tasks going so it's working memory doesn't get bloated. Compaction must not lose tract of task threads. Foreman doesn't review the work, but ensures that work is reviewed.
 
 **Commands**
 Create Task - Starts a task thread with a Worker agent.
@@ -39,7 +39,7 @@ Flag - Sent OS notification to Human when something demands their attention
 ### Worker
 
 Completes requested task with reasonable autonomy where SAFE. Should start with evaluating the request and coming up with a plan.
-Must end each turn with a command. Hook should ensure this is satisfied. Worker is expected to write and run tests, static analysis, etc before sending work for review. Safe and `/flag` more important than `/done` and wrong.
+Worker is expected to write and run tests, static analysis, etc before sending work for review. Safe and `/flag` more important than `/done` and wrong.
 
 **Commands**
 

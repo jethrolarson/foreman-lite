@@ -15,6 +15,13 @@ concept rather than introduce a procedural intermediate. Pipelines read linearly
 source order. Push correctness into the type layer; make illegal states unrepresentable
 where practical.
 
+Code comments should only be included when:
+1. Calling out an non-obvious hazard
+2. Documentation is warranted (e.g. public api jsdoc)
+3. Justifying breaking convention, standards, or doing something weird
+Don't narrate the code with comments!
+
+
 Minor duplication beats a premature abstraction, and YAGNI wins ties. Don't
 pre-optimize into something that's harder to maintain.
 
