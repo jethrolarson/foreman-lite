@@ -18,15 +18,32 @@ export const notificationId = (task, taskEvent) => {
 
 const STARTED_BY = { task: "Foreman", human: "a human in the pane" };
 
+// herdr reports "done" for a finished turn; to Foreman that is idle.
+const paneState = (paneStatus) =>
+  paneStatus === "blocked" ? "blocked" : "idle";
+
 // `stopped` context is a final reply, not a verdict.
-const headline = (source, taskId, taskEvent) => {
-  const role = source === "verifier" ? "Verifier" : "Worker";
-  const action = taskEvent?.action ?? "none";
-  if (action === "stopped")
-    return `${role} for task ${taskId} stopped without a signal (started by ${STARTED_BY[taskEvent.origin] ?? "unknown"}, stop reason: ${taskEvent.stopReason}). Final reply:`;
-  const label = source === "verifier" ? "Verifier verdict" : "Worker signal";
-  return `${label} for task ${taskId}: ${action}`;
+const meaning = (taskEvent) => {
+  switch (taskEvent?.action) {
+    case "planned":
+      return "waiting for your input on its plan";
+    case "done":
+      return "reports its result ready";
+    case "flag":
+      return "reports it is blocked and needs input";
+    case "approve":
+    case "deny":
+      return `verdict: ${taskEvent.action}`;
+    case "stopped":
+      return `ended its turn without a signal (started by ${STARTED_BY[taskEvent.origin] ?? "unknown"}, stop reason: ${taskEvent.stopReason}). Final reply`;
+    default:
+      return "has no recorded signal";
+  }
 };
+
+// Notifications fire only once a child stops, so the state is the child's at send time.
+const headline = (source, taskId, paneStatus, taskEvent) =>
+  `${source === "verifier" ? "Verifier" : "Worker"} for task ${taskId} is ${paneState(paneStatus)}; ${meaning(taskEvent)}:`;
 
 export const buildNotification = ({
   task,
@@ -45,7 +62,7 @@ export const buildNotification = ({
     message: {
       id: notificationId(task, taskEvent),
       customType: "foreman-task-signal",
-      content: `${headline(source, task.id, taskEvent)}\n${context}`,
+      content: `${headline(source, task.id, paneStatus, taskEvent)}\n${context}`,
       details: {
         source,
         taskId: task.id,
