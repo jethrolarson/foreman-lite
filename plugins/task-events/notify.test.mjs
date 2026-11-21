@@ -147,7 +147,27 @@ describe("task event notification logic", () => {
       now: () => 99,
     });
     expect(result.message.content).toBe(
-      "Worker for task task ended its turn without a signal (started by a human in the pane, stop reason: stop). Final reply:\nShould I also update the docs?",
+      "Worker for task task is idle; ended its turn without a signal (started by a human in the pane, stop reason: stop). Final reply:\nShould I also update the docs?",
+    );
+  });
+
+  it("states the child's state with what each signal means", () => {
+    const headlineFor = (role, paneStatus, action) =>
+      buildNotification({
+        task: { id: "t", role, foremanPaneId: "foreman" },
+        paneId: role,
+        paneStatus,
+        taskEvent: { role, action, context: "ctx", timestamp: 1 },
+        now: () => 1,
+      }).message.content.split("\n")[0];
+    expect(headlineFor("worker", "done", "planned")).toBe(
+      "Worker for task t is idle; waiting for your input on its plan:",
+    );
+    expect(headlineFor("worker", "blocked", "flag")).toBe(
+      "Worker for task t is blocked; reports it is blocked and needs input:",
+    );
+    expect(headlineFor("verifier", "idle", "deny")).toBe(
+      "Verifier for task t is idle; verdict: deny:",
     );
   });
 
